@@ -11,3 +11,9 @@ def private_key_to_hex(private_key: SigningKey) -> str:
 
 def public_key_to_hex(public_key: VerifyingKey) -> str:
     return public_key.to_string().hex()
+
+def public_key_from_hex(public_key_hex: str) -> VerifyingKey:
+    return VerifyingKey.from_string(
+        bytes.fromhex(public_key_hex),
+        curve=SECP256k1,
+    )
