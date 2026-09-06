@@ -39,7 +39,6 @@ def is_genesis_block(block: Block) -> bool:
     if not isinstance(block.transactions, list):
         return False
 
-    # Genesis có body rỗng.
     if block.transactions:
         return False
 
