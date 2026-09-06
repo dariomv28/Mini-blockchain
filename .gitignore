@@ -1,3 +1,5 @@
-/docs
-*/__pycache__
-transaction/__pycache__
+/docs/
+
+__pycache__/
+*.py[cod]
+*$py.class
