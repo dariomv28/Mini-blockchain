@@ -12,12 +12,7 @@ class UTXOSet:
     def get(self, txid: str, output_index: int) -> TxOutput | None:
         return self._utxos.get((txid, output_index))
 
-    def exists(
-        self,
-        txid: str,
-        output_index: int,
-    ) -> bool:
-
+    def exists(self, txid: str, output_index: int) -> bool:
         return (
             txid,
             output_index,
@@ -70,14 +65,14 @@ class UTXOSet:
         transaction: Transaction,
     ) -> None:
 
-        # Xóa UTXO cũ đã bị tiêu.
+        # Delete spent UTXO
         for tx_input in transaction.inputs:
             self.spend(
                 tx_input.previous_tx_id,
                 tx_input.output_index,
             )
 
-        # Tạo UTXO mới.
+        # Add new one
         self.add_transaction_outputs(
             transaction
         )
