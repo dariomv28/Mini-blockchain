@@ -2,24 +2,56 @@ from copy import deepcopy
 
 import pytest
 
-from blockchain.block import Block
 from blockchain.blockchain import Blockchain
 from blockchain.genesis import GENESIS_HASH, GENESIS_TIMESTAMP
 from blockchain.validation import validate_chain
+from consensus.pow import validate_proof_of_work
+from crypto.address import public_key_to_address
+from crypto.keys import generate_private_key, get_public_key
+from mining.block_template import create_block_template
+from mining.miner import mine_block
 from transaction.transaction import Transaction
+from transaction.tx_input import TxInput
 from transaction.tx_output import TxOutput
 
 
 NOW = GENESIS_TIMESTAMP + 100
 
 
-def make_candidate(chain: Blockchain, transactions=None) -> Block:
+def make_address() -> str:
+    private_key = generate_private_key()
+    return public_key_to_address(get_public_key(private_key))
+
+
+def make_payload(amount: int = 1) -> Transaction:
+    return Transaction(
+        inputs=[TxInput(previous_tx_id="funding", output_index=0)],
+        outputs=[TxOutput(amount=amount, recipient_address=make_address())],
+        timestamp=GENESIS_TIMESTAMP,
+    )
+
+
+def make_candidate(
+    chain: Blockchain,
+    transactions: list[Transaction] | None = None,
+):
     tip = chain.get_latest_block()
-    return Block(
-        transactions=[] if transactions is None else transactions,
-        previous_block_hash=tip.hash(),
+    template = create_block_template(
+        tip,
+        make_address(),
+        transactions=transactions,
         timestamp=tip.timestamp + 1,
     )
+    candidate = mine_block(template, max_nonce=100_000)
+    assert candidate is not None
+    return candidate
+
+
+def make_proof_invalid(block) -> None:
+    block.nonce += 1
+
+    while validate_proof_of_work(block):
+        block.nonce += 1
 
 
 def test_new_chain_contains_only_the_fixed_genesis():
@@ -31,7 +63,7 @@ def test_new_chain_contains_only_the_fixed_genesis():
     assert chain.validate_chain(current_time=NOW)
 
 
-def test_add_blocks_and_lookup():
+def test_add_mined_blocks_and_lookup():
     chain = Blockchain()
     first = make_candidate(chain)
     assert chain.add_block(first, current_time=NOW)
@@ -64,6 +96,24 @@ def test_rejected_block_leaves_chain_unchanged():
     assert candidate.merkle_root == "f" * 64
 
 
+def test_unmined_or_wrong_difficulty_block_leaves_chain_unchanged():
+    chain = Blockchain()
+    before = chain.chain
+    unmined = make_candidate(chain)
+    make_proof_invalid(unmined)
+
+    assert not chain.add_block(unmined, current_time=NOW)
+    assert chain.chain == before
+
+    wrong_difficulty = make_candidate(chain)
+    wrong_difficulty.difficulty = 1
+    wrong_difficulty = mine_block(wrong_difficulty)
+    assert wrong_difficulty is not None
+
+    assert not chain.add_block(wrong_difficulty, current_time=NOW)
+    assert chain.chain == before
+
+
 def test_same_block_cannot_be_added_twice():
     chain = Blockchain()
     candidate = make_candidate(chain)
@@ -76,8 +126,7 @@ def test_same_block_cannot_be_added_twice():
 def test_block_for_old_tip_is_rejected():
     chain = Blockchain()
     first = make_candidate(chain)
-    competing = deepcopy(first)
-    competing.nonce = 1
+    competing = make_candidate(chain)
 
     assert chain.add_block(first, current_time=NOW)
     assert not chain.add_block(competing, current_time=NOW)
@@ -93,18 +142,15 @@ def test_genesis_cannot_be_added_again():
 
 def test_mutating_original_candidate_cannot_change_stored_block():
     chain = Blockchain()
-    payload = Transaction(
-        inputs=[],
-        outputs=[TxOutput(amount=1, recipient_address="PYC_TEST")],
-        timestamp=GENESIS_TIMESTAMP,
-    )
+    payload = make_payload()
     candidate = make_candidate(chain, [payload])
     expected = deepcopy(candidate.to_dict())
     assert chain.add_block(candidate, current_time=NOW)
 
     candidate.nonce += 1
-    payload.outputs[0].amount = 999
+    candidate.transactions[1].outputs[0].amount = 999
     candidate.transactions.clear()
+    payload.outputs[0].amount = 888
 
     assert chain.get_latest_block().to_dict() == expected
     assert chain.validate_chain(current_time=NOW)
@@ -112,12 +158,7 @@ def test_mutating_original_candidate_cannot_change_stored_block():
 
 def test_getters_return_independent_nested_data():
     chain = Blockchain()
-    payload = Transaction(
-        inputs=[],
-        outputs=[TxOutput(amount=1, recipient_address="PYC_TEST")],
-        timestamp=GENESIS_TIMESTAMP,
-    )
-    candidate = make_candidate(chain, [payload])
+    candidate = make_candidate(chain, [make_payload()])
     assert chain.add_block(candidate, current_time=NOW)
 
     for copy in [
@@ -126,13 +167,13 @@ def test_getters_return_independent_nested_data():
         chain.get_block_by_hash(candidate.hash()),
         chain.chain[1],
     ]:
-        copy.transactions[0].outputs[0].amount = 999
+        copy.transactions[1].outputs[0].amount = 999
         copy.nonce += 1
 
     detached_list = chain.chain
     detached_list.clear()
     assert len(chain) == 2
-    assert chain.get_latest_block().transactions[0].outputs[0].amount == 1
+    assert chain.get_latest_block().transactions[1].outputs[0].amount == 1
     assert chain.validate_chain(current_time=NOW)
 
 
@@ -152,7 +193,7 @@ def test_tampered_snapshot_does_not_damage_the_live_chain():
         assert chain.add_block(make_candidate(chain), current_time=NOW)
 
     snapshot = chain.chain
-    snapshot[1].nonce += 1
+    make_proof_invalid(snapshot[1])
 
     assert not validate_chain(snapshot, current_time=NOW)
     assert chain.validate_chain(current_time=NOW)
