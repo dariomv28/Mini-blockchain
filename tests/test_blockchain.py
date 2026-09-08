@@ -8,11 +8,7 @@ from blockchain.validation import validate_chain
 from consensus.pow import validate_proof_of_work
 from crypto.address import public_key_to_address
 from crypto.keys import generate_private_key, get_public_key
-from mining.block_template import create_block_template
 from mining.miner import mine_block
-from transaction.transaction import Transaction
-from transaction.tx_input import TxInput
-from transaction.tx_output import TxOutput
 
 
 NOW = GENESIS_TIMESTAMP + 100
@@ -23,23 +19,10 @@ def make_address() -> str:
     return public_key_to_address(get_public_key(private_key))
 
 
-def make_payload(amount: int = 1) -> Transaction:
-    return Transaction(
-        inputs=[TxInput(previous_tx_id="funding", output_index=0)],
-        outputs=[TxOutput(amount=amount, recipient_address=make_address())],
-        timestamp=GENESIS_TIMESTAMP,
-    )
-
-
-def make_candidate(
-    chain: Blockchain,
-    transactions: list[Transaction] | None = None,
-):
+def make_candidate(chain: Blockchain):
     tip = chain.get_latest_block()
-    template = create_block_template(
-        tip,
+    template = chain.create_block_template(
         make_address(),
-        transactions=transactions,
         timestamp=tip.timestamp + 1,
     )
     candidate = mine_block(template, max_nonce=100_000)
@@ -142,15 +125,13 @@ def test_genesis_cannot_be_added_again():
 
 def test_mutating_original_candidate_cannot_change_stored_block():
     chain = Blockchain()
-    payload = make_payload()
-    candidate = make_candidate(chain, [payload])
+    candidate = make_candidate(chain)
     expected = deepcopy(candidate.to_dict())
     assert chain.add_block(candidate, current_time=NOW)
 
     candidate.nonce += 1
-    candidate.transactions[1].outputs[0].amount = 999
+    candidate.transactions[0].outputs[0].amount = 999
     candidate.transactions.clear()
-    payload.outputs[0].amount = 888
 
     assert chain.get_latest_block().to_dict() == expected
     assert chain.validate_chain(current_time=NOW)
@@ -158,7 +139,7 @@ def test_mutating_original_candidate_cannot_change_stored_block():
 
 def test_getters_return_independent_nested_data():
     chain = Blockchain()
-    candidate = make_candidate(chain, [make_payload()])
+    candidate = make_candidate(chain)
     assert chain.add_block(candidate, current_time=NOW)
 
     for copy in [
@@ -167,13 +148,13 @@ def test_getters_return_independent_nested_data():
         chain.get_block_by_hash(candidate.hash()),
         chain.chain[1],
     ]:
-        copy.transactions[1].outputs[0].amount = 999
+        copy.transactions[0].outputs[0].amount = 999
         copy.nonce += 1
 
     detached_list = chain.chain
     detached_list.clear()
     assert len(chain) == 2
-    assert chain.get_latest_block().transactions[1].outputs[0].amount == 1
+    assert chain.get_latest_block().transactions[0].outputs[0].amount == 50
     assert chain.validate_chain(current_time=NOW)
 
 

@@ -1,177 +1,110 @@
 from ecdsa.errors import MalformedPointError
 
-from crypto.address import (
-    public_key_to_address,
-    validate_address,
-)
+from crypto.address import public_key_to_address, validate_address
 from crypto.keys import public_key_from_hex
 from crypto.signature import verify_signature
-
 from transaction.transaction import Transaction
+from transaction.tx_input import TxInput
+from transaction.tx_output import TxOutput
 from transaction.utxo import UTXOSet
 
 
-def calculate_transaction_fee(
-    transaction: Transaction,
-    utxo_set: UTXOSet,
-) -> int:
-
-    total_input = 0
-
-    for tx_input in transaction.inputs:
-        utxo = utxo_set.get(
-            tx_input.previous_tx_id,
-            tx_input.output_index,
-        )
-
-        if utxo is None:
-            raise ValueError(
-                "Referenced UTXO does not exist"
-            )
-
-        total_input += utxo.amount
-
-    total_output = sum(
-        output.amount
-        for output in transaction.outputs
+def _is_valid_output(output: TxOutput) -> bool:
+    return (
+        isinstance(output, TxOutput)
+        and isinstance(output.amount, int)
+        and not isinstance(output.amount, bool)
+        and output.amount > 0
+        and validate_address(output.recipient_address)
     )
 
-    return total_input - total_output
 
+def _validated_fee(transaction: Transaction, utxo_set: UTXOSet) -> int | None:
+    """Return the fee only after all regular-transaction rules succeed."""
+    if not isinstance(transaction, Transaction) or not isinstance(utxo_set, UTXOSet):
+        return None
 
-def validate_transaction(
-    transaction: Transaction,
-    utxo_set: UTXOSet,
-) -> bool:
-
-    # Rule 1:
-    # Transaction thường phải có input.
-    if not transaction.inputs:
-        return False
-
-    # Rule 2:
-    # Phải tạo ít nhất một output.
-    if not transaction.outputs:
-        return False
-
-    # Rule 3 + 4:
-    # Kiểm tra amount và address.
-    for output in transaction.outputs:
-
-        # bool là subclass của int trong Python,
-        # nên phải loại riêng.
-        if (
-            not isinstance(output.amount, int)
-            or isinstance(output.amount, bool)
-        ):
-            return False
-
-        if output.amount <= 0:
-            return False
-
-        if not validate_address(
-            output.recipient_address
-        ):
-            return False
-
-    seen_outpoints = set()
-
-    total_input = 0
-
-    for input_index, tx_input in enumerate(
-        transaction.inputs
+    if (
+        not isinstance(transaction.version, int)
+        or isinstance(transaction.version, bool)
+        or transaction.version != 1
+        or not isinstance(transaction.timestamp, int)
+        or isinstance(transaction.timestamp, bool)
+        or transaction.timestamp < 0
+        or not isinstance(transaction.inputs, list)
+        or not transaction.inputs
+        or not isinstance(transaction.outputs, list)
+        or not transaction.outputs
     ):
+        return None
 
-        outpoint = (
-            tx_input.previous_tx_id,
-            tx_input.output_index,
-        )
+    if not all(_is_valid_output(output) for output in transaction.outputs):
+        return None
 
-        # Rule 5:
-        # Không được dùng cùng UTXO hai lần
-        # trong cùng một transaction.
-        if outpoint in seen_outpoints:
-            return False
-
-        seen_outpoints.add(
-            outpoint
-        )
-
-        # Rule 6:
-        # UTXO phải tồn tại.
-        utxo = utxo_set.get(
-            *outpoint
-        )
-
-        if utxo is None:
-            return False
-
+    # Check every input before serializing the transaction for any signature.
+    seen_outpoints = set()
+    for tx_input in transaction.inputs:
         if (
-            not tx_input.public_key
+            not isinstance(tx_input, TxInput)
+            or not isinstance(tx_input.previous_tx_id, str)
+            or not tx_input.previous_tx_id
+            or not isinstance(tx_input.output_index, int)
+            or isinstance(tx_input.output_index, bool)
+            or tx_input.output_index < 0
+            or not isinstance(tx_input.public_key, str)
+            or not tx_input.public_key
+            or not isinstance(tx_input.signature, str)
             or not tx_input.signature
         ):
-            return False
+            return None
 
-        # Chuyển public key hex
-        # về VerifyingKey.
-        try:
-            public_key = public_key_from_hex(
-                tx_input.public_key
-            )
+        outpoint = (tx_input.previous_tx_id, tx_input.output_index)
+        if outpoint in seen_outpoints:
+            return None
+        seen_outpoints.add(outpoint)
 
-            signature = bytes.fromhex(
-                tx_input.signature
-            )
+    total_input = 0
+    for input_index, tx_input in enumerate(transaction.inputs):
+        utxo = utxo_set.get(tx_input.previous_tx_id, tx_input.output_index)
+        if not _is_valid_output(utxo):
+            return None
 
-        except (
-            ValueError,
-            TypeError,
-            MalformedPointError,
-        ):
-            return False
-
-        # Rule 7:
-        # Public key phải tạo ra đúng address
-        # sở hữu UTXO.
-        derived_address = (
-            public_key_to_address(
-                public_key
-            )
-        )
-
-        if (
-            derived_address
-            != utxo.recipient_address
-        ):
-            return False
-
-        # Rule 8:
-        # Signature phải hợp lệ.
-        signing_bytes = (
-            transaction.signing_bytes(
-                input_index
-            )
-        )
-
+        public_key = public_key_from_hex(tx_input.public_key)
+        signature = bytes.fromhex(tx_input.signature)
+        if public_key_to_address(public_key) != utxo.recipient_address:
+            return None
         if not verify_signature(
-            public_key,
-            signing_bytes,
-            signature,
+            public_key, transaction.signing_bytes(input_index), signature
         ):
-            return False
-
-        # Amount input luôn lấy từ UTXO,
-        # KHÔNG lấy từ sender.
+            return None
         total_input += utxo.amount
 
-    total_output = sum(
-        output.amount
-        for output in transaction.outputs
-    )
+    fee = total_input - sum(output.amount for output in transaction.outputs)
+    return fee if fee >= 0 else None
 
-    # Rule 9:
-    # Không được tạo coin từ không khí.
-    if total_input < total_output:
-        return False
 
-    return True
+def _safe_validated_fee(transaction: Transaction, utxo_set: UTXOSet) -> int | None:
+    try:
+        return _validated_fee(transaction, utxo_set)
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+        MalformedPointError,
+    ):
+        # Malformed external data is invalid, never an accepted transaction.
+        return None
+
+
+def calculate_transaction_fee(transaction: Transaction, utxo_set: UTXOSet) -> int:
+    fee = _safe_validated_fee(transaction, utxo_set)
+    if fee is None:
+        raise ValueError("Cannot calculate fee for an invalid transaction")
+    return fee
+
+
+def validate_transaction(transaction: Transaction, utxo_set: UTXOSet) -> bool:
+    """Validate structure, ownership, signatures and value against a UTXO view."""
+    return _safe_validated_fee(transaction, utxo_set) is not None

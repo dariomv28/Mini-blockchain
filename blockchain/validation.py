@@ -2,6 +2,7 @@
 import time
 
 from blockchain.block import Block
+from blockchain.chainstate import ChainState, apply_block_transactions
 from blockchain.genesis import is_genesis_block
 from blockchain.merkle import calculate_merkle_root_from_txids
 from consensus.difficulty import (
@@ -12,7 +13,7 @@ from consensus.pow import (
     is_valid_nonce,
     validate_proof_of_work,
 )
-from mining.coinbase import validate_coinbase_transaction
+from mining.coinbase import validate_coinbase_structure
 from transaction.transaction import Transaction
 
 
@@ -95,7 +96,7 @@ def validate_block_structure(block: Block) -> bool:
 
 
 def validate_non_genesis_block_body(block: Block) -> bool:
-    """Check the Phase 5 coinbase placement rule, without UTXO validation."""
+    """Check coinbase placement/schema; the reward cap requires ledger state."""
     if not isinstance(block, Block):
         return False
 
@@ -111,14 +112,14 @@ def validate_non_genesis_block_body(block: Block) -> bool:
     ):
         return False
 
-    if not validate_coinbase_transaction(
+    if not validate_coinbase_structure(
         block.transactions[0],
         block_timestamp=block.timestamp,
     ):
         return False
 
     # The zero-input representation is reserved exclusively for the first
-    # transaction.  The meaning of later inputs is still Phase 6 work.
+    # transaction. Full input validation is performed against the ledger later.
     return all(
         isinstance(transaction.inputs, list)
         and bool(transaction.inputs)
@@ -126,12 +127,13 @@ def validate_non_genesis_block_body(block: Block) -> bool:
     )
 
 
-def validate_block(
+def validate_block_header(
     block: Block,
     previous_block: Block,
     *,
     current_time: int | None = None,
 ) -> bool:
+    """Check structure, link, time, difficulty, PoW and coinbase schema only."""
     now = _resolve_current_time(current_time)
 
     if not validate_block_structure(previous_block):
@@ -159,39 +161,81 @@ def validate_block(
     return validate_proof_of_work(block)
 
 
+def validate_and_apply_block(
+    block: Block,
+    previous_block: Block,
+    *,
+    state: ChainState,
+    current_time: int | None = None,
+) -> ChainState | None:
+    """Return the next state on success, without changing the supplied state."""
+    if not validate_block_header(block, previous_block, current_time=current_time):
+        return None
+    if not isinstance(state, ChainState):
+        return None
+    return apply_block_transactions(block, state)
+
+
+def validate_block(
+    block: Block,
+    previous_block: Block,
+    *,
+    state: ChainState,
+    current_time: int | None = None,
+) -> bool:
+    """Full validation given the trusted parent's ledger state."""
+    return validate_and_apply_block(
+        block, previous_block, state=state, current_time=current_time
+    ) is not None
+
+
+def rebuild_chain_state(
+    blocks: list[Block],
+    *,
+    current_time: int | None = None,
+) -> ChainState | None:
+    """Rebuild from the fixed genesis, independently of any cached UTXO state."""
+    now = _resolve_current_time(current_time)
+
+    if not isinstance(blocks, list) or not blocks:
+        return None
+
+    if not validate_block_structure(blocks[0]):
+        return None
+
+    if not is_genesis_block(blocks[0]):
+        return None
+
+    seen_hashes = {blocks[0].hash()}
+    state = ChainState()
+
+    for index in range(1, len(blocks)):
+        block = blocks[index]
+
+        next_state = validate_and_apply_block(
+            block,
+            blocks[index - 1],
+            state=state,
+            current_time=now,
+        )
+        if next_state is None:
+            return None
+
+        block_hash = block.hash()
+
+        if block_hash in seen_hashes:
+            return None
+
+        seen_hashes.add(block_hash)
+        state = next_state
+
+    return state
+
+
 def validate_chain(
     blocks: list[Block],
     *,
     current_time: int | None = None,
 ) -> bool:
-    now = _resolve_current_time(current_time)
-
-    if not isinstance(blocks, list) or not blocks:
-        return False
-
-    if not validate_block_structure(blocks[0]):
-        return False
-
-    if not is_genesis_block(blocks[0]):
-        return False
-
-    seen_hashes = {blocks[0].hash()}
-
-    for index in range(1, len(blocks)):
-        block = blocks[index]
-
-        if not validate_block(
-            block,
-            blocks[index - 1],
-            current_time=now,
-        ):
-            return False
-
-        block_hash = block.hash()
-
-        if block_hash in seen_hashes:
-            return False
-
-        seen_hashes.add(block_hash)
-
-    return True
+    """Validate every block and ledger transition from genesis."""
+    return rebuild_chain_state(blocks, current_time=current_time) is not None

@@ -3,11 +3,13 @@ from copy import deepcopy
 import pytest
 
 from blockchain.block import Block
+from blockchain.chainstate import ChainState
 from blockchain.genesis import GENESIS_TIMESTAMP, create_genesis_block
 from blockchain.merkle import calculate_merkle_root
 from blockchain.validation import (
     MAX_FUTURE_BLOCK_TIME,
     validate_block,
+    validate_block_header,
     validate_block_structure,
     validate_chain,
     validate_non_genesis_block_body,
@@ -51,9 +53,11 @@ def make_child(
     template = create_block_template(
         parent,
         make_address(),
-        transactions=transactions,
         timestamp=(parent.timestamp + 1 if timestamp is None else timestamp),
     )
+    # Raw payloads here intentionally exercise structure, not ledger validity.
+    template.transactions.extend([] if transactions is None else transactions)
+    template.refresh_merkle_root()
     mined = mine_block(template, max_nonce=100_000)
     assert mined is not None
     return mined
@@ -79,7 +83,7 @@ def test_valid_mined_block_and_chain():
     assert validate_block_structure(child)
     assert validate_non_genesis_block_body(child)
     assert validate_proof_of_work(child)
-    assert validate_block(child, genesis, current_time=NOW)
+    assert validate_block_header(child, genesis, current_time=NOW)
     assert validate_chain([genesis, child], current_time=NOW)
 
 
@@ -129,17 +133,17 @@ def test_wrong_parent_hash_is_rejected():
     child.previous_block_hash = "f" * 64
 
     assert validate_block_structure(child)
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
 def test_timestamp_can_equal_parent_but_cannot_go_backwards():
     genesis = create_genesis_block()
     child = make_child(genesis, timestamp=genesis.timestamp)
 
-    assert validate_block(child, genesis, current_time=NOW)
+    assert validate_block_header(child, genesis, current_time=NOW)
 
     child.timestamp -= 1
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
 def test_future_timestamp_boundary():
@@ -148,13 +152,13 @@ def test_future_timestamp_boundary():
         genesis,
         timestamp=NOW + MAX_FUTURE_BLOCK_TIME,
     )
-    assert validate_block(child, genesis, current_time=NOW)
+    assert validate_block_header(child, genesis, current_time=NOW)
 
     too_far = make_child(
         genesis,
         timestamp=NOW + MAX_FUTURE_BLOCK_TIME + 1,
     )
-    assert not validate_block(too_far, genesis, current_time=NOW)
+    assert not validate_block_header(too_far, genesis, current_time=NOW)
 
 
 def test_merkle_validation_detects_changed_body_without_repairing_it():
@@ -210,7 +214,7 @@ def test_altered_genesis_cannot_anchor_a_chain():
 
     # Pairwise validation trusts the supplied parent; full-chain validation
     # additionally anchors at this network's fixed genesis.
-    assert validate_block(child, fake, current_time=NOW)
+    assert validate_block_header(child, fake, current_time=NOW)
     assert not validate_chain([fake, child], current_time=NOW)
 
 
@@ -242,8 +246,8 @@ def test_relinking_a_descendant_requires_mining_it_again():
         first.nonce += 1
 
     assert first.hash() != old_first_hash
-    assert validate_block(first, genesis, current_time=NOW)
-    assert not validate_block(second, first, current_time=NOW)
+    assert validate_block_header(first, genesis, current_time=NOW)
+    assert not validate_block_header(second, first, current_time=NOW)
     assert not validate_chain([genesis, first, second], current_time=NOW)
 
     reminted_second = remine(second)
@@ -266,7 +270,7 @@ def test_block_body_requires_first_and_only_coinbase():
 
     assert validate_block_structure(child)
     assert not validate_non_genesis_block_body(child)
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
 def test_non_genesis_empty_block_is_rejected_even_if_it_is_mined():
@@ -278,7 +282,7 @@ def test_non_genesis_empty_block_is_rejected_even_if_it_is_mined():
 
     assert validate_block_structure(child)
     assert not validate_non_genesis_block_body(child)
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
 def test_block_body_rejects_a_second_zero_input_transaction():
@@ -295,7 +299,7 @@ def test_block_body_rejects_a_second_zero_input_transaction():
 
     assert validate_block_structure(child)
     assert not validate_non_genesis_block_body(child)
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
 def test_expected_difficulty_and_pow_are_required_before_acceptance():
@@ -305,20 +309,22 @@ def test_expected_difficulty_and_pow_are_required_before_acceptance():
     child = remine(child)
 
     assert validate_proof_of_work(child)
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
     child = make_child(genesis)
     make_proof_invalid(child)
 
-    assert not validate_block(child, genesis, current_time=NOW)
+    assert not validate_block_header(child, genesis, current_time=NOW)
 
 
-def test_phase_five_still_does_not_validate_regular_transaction_utxos():
+def test_stateless_checks_do_not_replace_full_ledger_validation():
     payload = make_payload(1)
     genesis = create_genesis_block()
     child = make_child(genesis, [payload])
 
     assert validate_block_structure(child)
     assert validate_non_genesis_block_body(child)
-    assert validate_block(child, genesis, current_time=NOW)
+    assert validate_block_header(child, genesis, current_time=NOW)
     assert not validate_transaction(payload, UTXOSet())
+    assert not validate_block(child, genesis, state=ChainState(), current_time=NOW)
+    assert not validate_chain([genesis, child], current_time=NOW)

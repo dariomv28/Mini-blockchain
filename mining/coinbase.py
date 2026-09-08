@@ -15,6 +15,7 @@ def create_coinbase_transaction(
     recipient_address: str,
     *,
     timestamp: int,
+    fees: int = 0,
 ) -> Transaction:
     if not validate_address(recipient_address):
         raise ValueError("recipient_address must be a valid PyChain address")
@@ -22,11 +23,14 @@ def create_coinbase_transaction(
     if not _is_non_negative_integer(timestamp):
         raise ValueError("timestamp must be a non-negative integer")
 
+    if not _is_non_negative_integer(fees):
+        raise ValueError("fees must be a non-negative integer")
+
     return Transaction(
         inputs=[],
         outputs=[
             TxOutput(
-                amount=BLOCK_SUBSIDY,
+                amount=BLOCK_SUBSIDY + fees,
                 recipient_address=recipient_address,
             )
         ],
@@ -43,7 +47,7 @@ def is_coinbase_transaction(transaction: object) -> bool:
     )
 
 
-def validate_coinbase_transaction(
+def validate_coinbase_structure(
     transaction: object,
     *,
     block_timestamp: int,
@@ -77,6 +81,20 @@ def validate_coinbase_transaction(
     return (
         isinstance(output, TxOutput)
         and type(output.amount) is int
-        and output.amount == BLOCK_SUBSIDY
+        and output.amount > 0
         and validate_address(output.recipient_address)
+    )
+
+
+def validate_coinbase_transaction(
+    transaction: object,
+    *,
+    block_timestamp: int,
+    total_fees: int = 0,
+) -> bool:
+    """Check the reward cap using fees independently verified by the caller."""
+    return (
+        _is_non_negative_integer(total_fees)
+        and validate_coinbase_structure(transaction, block_timestamp=block_timestamp)
+        and transaction.outputs[0].amount <= BLOCK_SUBSIDY + total_fees
     )

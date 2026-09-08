@@ -5,6 +5,8 @@ from blockchain.block import Block
 from consensus.difficulty import expected_difficulty
 from mining.coinbase import create_coinbase_transaction
 from transaction.transaction import Transaction
+from transaction.processing import apply_transactions
+from transaction.utxo import UTXOSet
 
 
 def _resolve_timestamp(timestamp: int | None) -> int:
@@ -23,8 +25,10 @@ def create_block_template(
     *,
     transactions: list[Transaction] | None = None,
     timestamp: int | None = None,
+    utxo_set: UTXOSet | None = None,
+    seen_txids: set[str] | None = None,
 ) -> Block:
-    """Create a candidate with coinbase first and a deterministic difficulty.
+    """Build a candidate using verified fees from the parent's ledger state.
 
     The caller still has to mine the returned block, then submit it through
     ``Blockchain.add_block()`` for full validation.
@@ -41,7 +45,7 @@ def create_block_template(
     block_timestamp = _resolve_timestamp(timestamp)
 
     if timestamp is None:
-        block_timestamp = max(block_timestamp, previous_block.timestamp)
+        block_timestamp = max(block_timestamp, previous_block.timestamp + 1)
 
     if block_timestamp < previous_block.timestamp:
         raise ValueError("timestamp cannot be earlier than the previous block")
@@ -62,10 +66,23 @@ def create_block_template(
     ):
         raise ValueError("regular transactions must contain at least one input")
 
+    if (utxo_set is None) != (seen_txids is None):
+        raise ValueError("utxo_set and seen_txids must be supplied together")
+    if regular_transactions and utxo_set is None:
+        raise ValueError("Transactions require the parent UTXO and TXID state")
+
+    total_fees = 0
+    if utxo_set is not None:
+        result = apply_transactions(regular_transactions, utxo_set, seen_txids)
+        total_fees = result.total_fees
+
     coinbase = create_coinbase_transaction(
         miner_address,
         timestamp=block_timestamp,
+        fees=total_fees,
     )
+    if utxo_set is not None and coinbase.txid() in result.seen_txids:
+        raise ValueError("Coinbase TXID already exists; choose a later timestamp")
 
     return Block(
         transactions=[coinbase, *regular_transactions],
