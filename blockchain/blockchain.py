@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 
 from blockchain.block import Block
 from blockchain.chainstate import ChainState
@@ -8,6 +9,12 @@ from blockchain.validation import (
     rebuild_chain_state,
 )
 from mining.block_template import create_block_template
+from storage.chain_store import SQLiteChainStore
+from storage.errors import (
+    StorageClosedError,
+    StorageCommitUncertainError,
+    StorageError,
+)
 from transaction.mempool import (
     DEFAULT_BLOCK_MAX_BYTES,
     DEFAULT_BLOCK_MAX_TRANSACTIONS,
@@ -25,54 +32,178 @@ class Blockchain:
     def __init__(
         self,
         *,
-        mempool_max_transactions: int = DEFAULT_MEMPOOL_MAX_TRANSACTIONS,
-        mempool_max_bytes: int = DEFAULT_MEMPOOL_MAX_BYTES,
+        db_path: str | Path | None = None,
+        current_time: int | None = None,
+        mempool_max_transactions: int | None = None,
+        mempool_max_bytes: int | None = None,
     ) -> None:
+        if current_time is not None and (
+            type(current_time) is not int or current_time < 0
+        ):
+            raise ValueError("current_time must be a non-negative integer")
+        self._store: SQLiteChainStore | None = None
+        self._closed = False
+        self._storage_failed = False
+        self._revision = 0
         self._blocks: list[Block] = [create_genesis_block()]
         self._state = ChainState()
+        # Validate configuration before any connection can create a file.
         self._mempool = Mempool(
             self._state.utxo_set,
             self._state.seen_txids,
-            max_transactions=mempool_max_transactions,
-            max_bytes=mempool_max_bytes,
+            max_transactions=(
+                DEFAULT_MEMPOOL_MAX_TRANSACTIONS
+                if mempool_max_transactions is None else mempool_max_transactions
+            ),
+            max_bytes=(
+                DEFAULT_MEMPOOL_MAX_BYTES
+                if mempool_max_bytes is None else mempool_max_bytes
+            ),
         )
+        if db_path is not None:
+            store = SQLiteChainStore(db_path)
+            try:
+                recovered = store.load_or_initialize(
+                    current_time=current_time,
+                    max_transactions=mempool_max_transactions,
+                    max_bytes=mempool_max_bytes,
+                )
+            except BaseException as error:
+                try:
+                    store.close()
+                except Exception as cleanup_error:
+                    if hasattr(error, "add_note"):
+                        error.add_note(f"Store cleanup also failed: {cleanup_error}")
+                raise
+            self._store = store
+            self._blocks, self._state, self._mempool, self._revision = (
+                recovered.blocks, recovered.state, recovered.mempool,
+                recovered.revision,
+            )
+
+    def _ensure_usable(self) -> None:
+        if self._closed:
+            raise StorageClosedError("Blockchain is closed; open a new instance")
+        if self._storage_failed:
+            raise StorageError("Storage operation failed; close and reopen the blockchain")
+
+    def close(self) -> None:
+        """Release the persistent connection; every mutation was already saved."""
+        if self._store is not None and not self._closed:
+            try:
+                self._store.close()
+            finally:
+                self._closed = True
+
+    def __enter__(self) -> "Blockchain":
+        self._ensure_usable()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_value is None:
+            self.close()
+        else:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                if hasattr(exc_value, "add_note"):
+                    exc_value.add_note(f"Store cleanup also failed: {cleanup_error}")
+
+    def _commit(
+        self,
+        blocks: list[Block],
+        state: ChainState,
+        mempool: Mempool,
+        *,
+        block: Block | None = None,
+    ) -> None:
+        """Persist a prepared transition before publishing any live references."""
+        if self._store is None:
+            self._blocks, self._state, self._mempool = blocks, state, mempool
+            return
+        try:
+            expected = {
+                "expected_height": len(self._blocks) - 1,
+                "expected_tip_hash": self._blocks[-1].hash(),
+                "expected_revision": self._revision,
+            }
+            if block is None:
+                revision = self._store.replace_mempool(mempool, **expected)
+            else:
+                revision = self._store.append_block(block, state, mempool, **expected)
+            self._blocks, self._state, self._mempool, self._revision = (
+                blocks, state, mempool, revision
+            )
+        except BaseException as error:
+            # The disk outcome may be uncertain, even if Python never published
+            # the new references. Never continue serving a possibly stale node.
+            self._storage_failed = True
+            if isinstance(error, StorageError):
+                raise
+            if isinstance(error, Exception):
+                raise StorageCommitUncertainError(
+                    "Persistent transition interrupted; close and reopen to recover"
+                ) from error
+            raise
 
     def __len__(self) -> int:
+        self._ensure_usable()
         return len(self._blocks)
 
     @property
     def height(self) -> int:
+        self._ensure_usable()
         return len(self._blocks) - 1
 
     @property
     def chain(self) -> list[Block]:
+        self._ensure_usable()
         return deepcopy(self._blocks)
 
     @property
     def utxo_set(self) -> UTXOSet:
         """An independent snapshot; mutating it never changes live balances."""
+        self._ensure_usable()
         return self._state.utxo_set.copy()
 
     @property
     def mempool(self) -> Mempool:
         """An independent snapshot; use submit/remove methods for live changes."""
+        self._ensure_usable()
         return self._mempool.copy()
 
     def submit_transaction(self, transaction: Transaction) -> bool:
         """Admit a pending transaction without changing confirmed state."""
-        return self._mempool.add_transaction(transaction)
+        self._ensure_usable()
+        if self._store is None:
+            return self._mempool.add_transaction(transaction)
+        next_mempool = self._mempool.copy()
+        if not next_mempool.add_transaction(transaction):
+            return False
+        self._commit(self._blocks, self._state, next_mempool)
+        return True
 
     def remove_pending_transaction(self, txid: str) -> bool:
         """Remove a pending transaction and descendants that lose their inputs."""
-        return self._mempool.remove_transaction(txid)
+        self._ensure_usable()
+        if self._store is None:
+            return self._mempool.remove_transaction(txid)
+        next_mempool = self._mempool.copy()
+        if not next_mempool.remove_transaction(txid):
+            return False
+        self._commit(self._blocks, self._state, next_mempool)
+        return True
 
     def get_balance(self, address: str) -> int:
+        self._ensure_usable()
         return self._state.utxo_set.get_balance(address)
 
     def get_utxos_for_address(self, address: str) -> dict[tuple[str, int], TxOutput]:
+        self._ensure_usable()
         return self._state.utxo_set.get_utxos_for_address(address)
 
     def has_transaction(self, txid: str) -> bool:
+        self._ensure_usable()
         return isinstance(txid, str) and txid in self._state.seen_txids
 
     def create_block_template(
@@ -82,6 +213,7 @@ class Blockchain:
         transactions: list[Transaction] | None = None,
         timestamp: int | None = None,
     ) -> Block:
+        self._ensure_usable()
         return create_block_template(
             self._blocks[-1],
             miner_address,
@@ -92,6 +224,7 @@ class Blockchain:
         )
 
     def get_latest_block(self) -> Block:
+        self._ensure_usable()
         return deepcopy(self._blocks[-1])
 
     def create_mempool_block_template(
@@ -107,6 +240,7 @@ class Blockchain:
         Limits cover regular transactions only, not coinbase or block framing.
         Building/mining a template does not remove transactions from the pool.
         """
+        self._ensure_usable()
         selected = self._mempool.select_transactions(
             max_transactions=max_transactions,
             max_bytes=max_bytes,
@@ -118,6 +252,7 @@ class Blockchain:
         )
 
     def get_block_by_height(self, height: int) -> Block | None:
+        self._ensure_usable()
         if type(height) is not int:
             return None
 
@@ -127,6 +262,7 @@ class Blockchain:
         return deepcopy(self._blocks[height])
 
     def get_block_by_hash(self, block_hash: str) -> Block | None:
+        self._ensure_usable()
         for block in self._blocks:
             if block.hash() == block_hash:
                 return deepcopy(block)
@@ -139,6 +275,7 @@ class Blockchain:
         *,
         current_time: int | None = None,
     ) -> bool:
+        self._ensure_usable()
         if not isinstance(block, Block):
             return False
 
@@ -168,11 +305,10 @@ class Blockchain:
             next_state.seen_txids,
         )
 
-        # Build every replacement first. A rejected block never changes history,
-        # confirmed state or pool. This is a single-threaded in-memory commit.
-        self._blocks, self._state, self._mempool = (
-            [*self._blocks, candidate], next_state, next_mempool
-        )
+        # Allocate all replacements before SQLite commit. Block + confirmed
+        # caches + revalidated pending pool must share one durable transaction.
+        next_blocks = [*self._blocks, candidate]
+        self._commit(next_blocks, next_state, next_mempool, block=candidate)
         return True
 
     def validate_chain(
@@ -180,6 +316,7 @@ class Blockchain:
         *,
         current_time: int | None = None,
     ) -> bool:
+        self._ensure_usable()
         rebuilt = rebuild_chain_state(
             self._blocks,
             current_time=current_time,
