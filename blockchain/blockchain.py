@@ -172,6 +172,11 @@ class Blockchain:
         self._ensure_usable()
         return self._mempool.copy()
 
+    def get_mempool_stats(self) -> tuple[int, int]:
+        """Return count and signed bytes without copying state or writing disk."""
+        self._ensure_usable()
+        return len(self._mempool), self._mempool.total_bytes
+
     def submit_transaction(self, transaction: Transaction) -> bool:
         """Admit a pending transaction without changing confirmed state."""
         self._ensure_usable()
