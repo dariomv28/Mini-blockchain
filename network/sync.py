@@ -5,6 +5,7 @@ This module never replaces a chain, opens a database, or trusts peer state.
 """
 
 from dataclasses import dataclass
+import base64
 import secrets
 
 from network.errors import PolicyLimitError, ProtocolError
@@ -23,7 +24,7 @@ def raw_size(encoded: str) -> int:
 class ExportSnapshot:
     token: str
     tip: str
-    items: list[str]
+    items: list[bytes]
     size: int
     cursor: int
     created: float
@@ -128,6 +129,8 @@ class SyncManager:
             if code == "FORK_UNSUPPORTED":
                 session.sync_state = "DIVERGED"
             if code == "UNKNOWN_ANCHOR":
+                session.rejected_anchor = (request.payload["anchor_height"],
+                                           request.payload["anchor_hash"])
                 self.node._request(session, "GET_STATUS", {})
         elif request.kind == "GET_MEMPOOL":
             self.downloads.pop(session.peer.connection_id, None)
@@ -193,8 +196,14 @@ class SyncManager:
         if not payload["more"] and self.node._tip()[1] != payload["tip_hash"]:
             raise ProtocolError("BLOCKS final hash differs from advertised snapshot")
         session.remote_height, session.remote_tip = payload["tip_height"], payload["tip_hash"]
-        session.sync_after = 0.0
-        session.error = None
+        if not items:
+            # A high advertised tip is not progress. Avoid repeatedly selecting
+            # a peer that alternates inflated STATUS with empty anchored replies.
+            session.sync_after = self.node._clock() + self.config.retry_delay
+            session.error = "NO_PROGRESS"
+        else:
+            session.sync_after = 0.0
+            session.error = None
         if not payload["more"]:
             self.node._request(session, "GET_STATUS", {})
 
@@ -234,10 +243,12 @@ class SyncManager:
                     encoded = pack_transaction(tx, max_item_bytes=self.config.max_item_bytes)
                     # Every item must fit even at the largest possible cursor.
                     probe = {"tip_hash": tip, "snapshot_id": token, "cursor": count,
-                             "transactions": [encoded], "next_cursor": count, "done": False}
+                             "transactions": [encoded], "next_cursor": count + 1, "done": False}
                     encode_message(Message("MEMPOOL", probe, message.request_id),
                                    max_frame_bytes=self.config.max_frame_bytes)
-                    items.append(encoded)
+                    # Retain raw signed bytes, not the 4/3 larger base64 string,
+                    # so the global byte reservation measures retained payloads.
+                    items.append(base64.b64decode(encoded, validate=True))
                 snapshot = ExportSnapshot(token, tip, items, size, 0, now, now)
                 self.exports[connection_id] = snapshot
             except BaseException as error:
@@ -255,7 +266,8 @@ class SyncManager:
         result = {"tip_hash": tip, "snapshot_id": snapshot.token, "cursor": start,
                   "transactions": [], "next_cursor": start, "done": start == len(snapshot.items)}
         for index in range(start, min(len(snapshot.items), start + payload["limit"])):
-            trial = dict(result, transactions=[*result["transactions"], snapshot.items[index]],
+            encoded = base64.b64encode(snapshot.items[index]).decode("ascii")
+            trial = dict(result, transactions=[*result["transactions"], encoded],
                          next_cursor=index + 1, done=index + 1 == len(snapshot.items))
             try:
                 encode_message(Message("MEMPOOL", trial, message.request_id),

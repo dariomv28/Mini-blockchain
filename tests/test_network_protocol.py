@@ -304,6 +304,15 @@ def test_config_defaults_and_detached_frozen_collections():
         config.port = 10
 
 
+def test_seed_capacity_counts_unique_normalized_endpoints_and_accepts_exact_boundary():
+    endpoints = (("127.0.0.1", 5001), ("127.0.0.1", 5002))
+    assert NodeConfig(seeds=endpoints, max_candidates=2).seeds == endpoints
+    config = NodeConfig(seeds=[list(endpoints[0]), endpoints[0], endpoints[1]], max_candidates=2)
+    assert config.seeds == endpoints
+    with pytest.raises(ValueError, match="unique seeds exceed max_candidates"):
+        NodeConfig(seeds=endpoints + (("127.0.0.1", 5003),), max_candidates=2)
+
+
 @pytest.mark.parametrize("field,value", [
     ("port", True), ("port", -1), ("port", 65536),
     ("max_peers", 0), ("max_frame_bytes", 2**32), ("max_item_bytes", True),

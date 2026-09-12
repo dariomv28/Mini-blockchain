@@ -6,8 +6,9 @@ from copy import deepcopy
 import pytest
 
 from mining.coinbase import create_coinbase_transaction
+from blockchain.genesis import GENESIS_TIMESTAMP
 from network import Node
-from network.errors import NodeClosedError
+from network.errors import NodeBusyError, NodeClosedError
 from network_worker import (
     ALICE, BOB, CAROL, KEYS, MINER, WirePeer, close_nodes, config,
     item, mine, transfer, wait_status,
@@ -106,7 +107,7 @@ def test_invalid_remote_transaction_is_not_relayed_or_fatal(defect):
             elif defect == "owner":
                 bad.sign_input(0, KEYS[2])
             elif defect == "coinbase":
-                bad = create_coinbase_transaction(MINER)
+                bad = create_coinbase_transaction(MINER, timestamp=GENESIS_TIMESTAMP + 10)
             else:
                 assert await a.submit_transaction(valid)
                 await wait_status(b, lambda s: s["pending_count"] == 1)
@@ -174,4 +175,41 @@ def test_lifecycle_guards_cancelled_callers_and_concurrent_stop_release_port():
         server.close()
         await server.wait_closed()
         assert node.state == "STOPPED"
+    asyncio.run(scenario())
+
+
+def test_cancel_before_dispatch_does_not_admit_and_releases_budget():
+    async def scenario():
+        node = Node(config())
+        try:
+            await node.start()
+            funding = await mine(node)
+            transaction = transfer(funding.transactions[0])
+            call = asyncio.create_task(node.submit_transaction(transaction))
+            # Run the caller through enqueue, then cancel it before the newly
+            # awakened dispatcher can begin the synchronous mutation.
+            asyncio.get_running_loop().call_soon(call.cancel)
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            assert await node.get_pending_transactions() == []
+            assert await node.submit_transaction(transaction)
+        finally:
+            await node.stop()
+        assert node._inbound_events == node._inbound_bytes == 0
+    asyncio.run(scenario())
+
+
+def test_local_command_cannot_bypass_inbound_byte_limit():
+    async def scenario():
+        node = Node(config(inbound_max_bytes=64))
+        try:
+            await node.start()
+            template = await node.create_mempool_block_template(ALICE)
+            with pytest.raises(NodeBusyError):
+                await node.accept_block(template)
+            assert (await node.get_status())["height"] == 0
+            assert node.state == "RUNNING"
+        finally:
+            await node.stop()
+        assert node._inbound_events == node._inbound_bytes == 0
     asyncio.run(scenario())

@@ -11,7 +11,6 @@ import pytest
 
 from blockchain.blockchain import Blockchain
 from network import Node
-from network.errors import NodeClosedError
 from network_worker import (
     ALICE, CAROL, KEYS, WirePeer, close_nodes, config, mine, transfer,
     wait_status, wait_until,
@@ -91,7 +90,7 @@ def test_storage_fault_before_or_after_commit_fails_without_relay(
             await wait_until(lambda: a.state == "FAILED")
             await a.stop()
             assert calls == [operation]
-            with pytest.raises(NodeClosedError):
+            with pytest.raises(StorageError):
                 await a.get_pending_transactions()
             assert (await b.get_status())["height"] == 1
             assert await b.get_pending_transactions() == []
@@ -164,7 +163,7 @@ def test_startup_corrupt_database_is_preserved_without_ram_fallback(tmp_path):
             with pytest.raises(StorageError):
                 await node.start()
             assert node.state == "FAILED"
-            with pytest.raises(NodeClosedError):
+            with pytest.raises(StorageError):
                 await node.get_status()
         finally:
             await node.stop()
@@ -206,3 +205,140 @@ def test_independent_subprocess_syncs_and_persists_over_tcp(tmp_path):
             assert chain.mempool.get_transactions() == [pending]
             assert chain.validate_chain()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["transaction", "block"])
+def test_durable_commit_precedes_enqueue_and_enqueue_failure_does_not_rollback(
+    tmp_path, monkeypatch, operation,
+):
+    async def scenario():
+        path = tmp_path / "commit-order.sqlite3"
+        node = Node(config(path))
+        peer = None
+        try:
+            await node.start()
+            funding = await mine(node)
+            peer = await WirePeer.connect(node, height=1, tip_hash=funding.hash())
+            await peer.barrier()
+            connection = next(s.peer for s in node._sessions.values()
+                              if s.peer.node_id == peer.node_id)
+            original_send = connection.send
+            relays = []
+            transaction = transfer(funding.transactions[0])
+            if operation == "transaction":
+                announcement = "NEW_TRANSACTION"
+                mutate = lambda: node.submit_transaction(transaction)
+            else:
+                from mining.miner import mine_block
+                announcement = "NEW_BLOCK"
+                block = mine_block(await node.create_mempool_block_template(ALICE),
+                                   max_nonce=100_000)
+                assert block is not None
+                mutate = lambda: node.accept_block(block)
+
+            def assert_durable_then_fail_enqueue(message):
+                if message.type == announcement:
+                    # This runs at the actual per-socket queue boundary, before
+                    # its writer has any opportunity to transmit the frame.
+                    with Blockchain(db_path=path) as observer:
+                        if operation == "transaction":
+                            assert observer.mempool.get_transactions() == [transaction]
+                        else:
+                            assert observer.get_latest_block().hash() == block.hash()
+                    assert node._chain._revision == 2
+                    relays.append(message.type)
+                    return False
+                return original_send(message)
+
+            monkeypatch.setattr(connection, "send", assert_durable_then_fail_enqueue)
+            assert await mutate()
+            assert relays == [announcement]
+            assert node.state == "RUNNING"
+            if operation == "transaction":
+                assert await node.get_pending_transactions() == [transaction]
+            else:
+                assert (await node.get_status())["height"] == 2
+        finally:
+            if peer:
+                await peer.close()
+            await node.stop()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_mempool_stats_track_signed_bytes_without_copying_or_writing(
+    tmp_path, monkeypatch, persistent,
+):
+    from blockchain.genesis import GENESIS_TIMESTAMP
+    from crypto.hash import serialize
+    from mining.miner import mine_block
+    from transaction.mempool import Mempool
+
+    path = tmp_path / "mempool-stats.sqlite3" if persistent else None
+    with Blockchain(db_path=path) as chain:
+        def confirm(*transactions):
+            template = chain.create_block_template(
+                ALICE, transactions=list(transactions),
+                timestamp=GENESIS_TIMESTAMP + chain.height + 1,
+            )
+            block = mine_block(template, max_nonce=100_000)
+            assert block is not None
+            assert chain.add_block(block, current_time=GENESIS_TIMESTAMP + 100)
+            return block
+
+        def assert_stats(*transactions):
+            expected = (
+                len(transactions),
+                sum(len(serialize(tx.to_dict())) for tx in transactions),
+            )
+            revision = chain._revision
+
+            def forbidden(*args, **kwargs):
+                pytest.fail("Reading mempool stats must not copy state or write storage")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(Mempool, "copy", forbidden)
+                patch.setattr(Mempool, "get_transactions", forbidden)
+                patch.setattr("transaction.mempool.deepcopy", forbidden)
+                patch.setattr("blockchain.blockchain.deepcopy", forbidden)
+                if chain._store is not None:
+                    patch.setattr(chain._store, "replace_mempool", forbidden)
+                    patch.setattr(chain._store, "append_block", forbidden)
+                assert chain.get_mempool_stats() == expected
+                assert chain.get_mempool_stats() == expected
+                assert chain._revision == revision
+
+        assert_stats()
+        funding = confirm().transactions[0]
+        parent = transfer(funding)
+        child = transfer(parent, KEYS[1], [(40, CAROL)])
+        assert chain.submit_transaction(parent)
+        assert_stats(parent)
+        assert chain.submit_transaction(child)
+        assert_stats(parent, child)
+        assert chain.remove_pending_transaction(parent.txid())
+        assert_stats()
+        assert chain.submit_transaction(parent)
+        assert chain.submit_transaction(child)
+        assert_stats(parent, child)
+        confirm(parent)
+        assert_stats(child)
+        confirm(child)
+        assert_stats()
+
+
+@pytest.mark.parametrize("unusable", ["closed", "storage_failed"])
+def test_mempool_stats_reject_unusable_persistent_chain(tmp_path, unusable):
+    chain = Blockchain(db_path=tmp_path / "unusable-stats.sqlite3")
+    try:
+        assert chain.get_mempool_stats() == (0, 0)
+        if unusable == "closed":
+            chain.close()
+            expected_message = "Blockchain is closed"
+        else:
+            chain._storage_failed = True
+            expected_message = "Storage operation failed"
+        with pytest.raises(StorageError, match=expected_message):
+            chain.get_mempool_stats()
+    finally:
+        chain.close()

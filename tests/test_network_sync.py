@@ -11,9 +11,10 @@ from blockchain.genesis import GENESIS_HASH, GENESIS_TIMESTAMP
 from consensus.pow import validate_proof_of_work
 from mining.miner import mine_block
 from network import Node
+from storage.codec import encode_transaction
 from network_worker import (
     ALICE, CAROL, KEYS, MINER, WirePeer, close_nodes, config, item,
-    mine, transfer, wait_status,
+    mine, transfer, wait_status, wait_until,
 )
 
 
@@ -190,4 +191,178 @@ def test_mempool_exchange_respects_receiver_capacity_without_failing_node():
             assert b.state == "RUNNING" and await b.validate_chain()
         finally:
             await close_nodes(a, b)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("limit", ["count", "item"])
+def test_mempool_snapshot_limits_report_policy_and_release_reservations(monkeypatch, limit):
+    async def scenario():
+        limits = {"snapshot_max_transactions": 1} if limit == "count" else {"max_item_bytes": 64}
+        node = Node(config(**limits))
+        peer = None
+        try:
+            await node.start()
+            funding = await mine(node)
+            parent = transfer(funding.transactions[0])
+            child = transfer(parent, KEYS[1], [(40, CAROL)])
+            assert await node.submit_transaction(parent)
+            assert await node.submit_transaction(child)
+            peer = await WirePeer.connect(node, height=1, tip_hash=funding.hash())
+            request_id = secrets.token_hex(16)
+            with monkeypatch.context() as patch:
+                if limit == "count":
+                    def forbidden_copy(self):
+                        raise AssertionError("over-limit pool was copied before snapshot preflight")
+                    patch.setattr("transaction.mempool.Mempool.copy", forbidden_copy)
+                await peer.send("GET_MEMPOOL", {
+                    "tip_hash": funding.hash(), "snapshot_id": None, "cursor": 0, "limit": 1,
+                }, request_id)
+                response = await peer.receive("ERROR", request_id=request_id)
+                assert response["payload"]["code"] == "POLICY_LIMIT"
+            assert node._sync.snapshot_bytes == 0
+            assert await node.get_pending_transactions() == [parent, child]
+            assert node.state == "RUNNING"
+        finally:
+            if peer:
+                await peer.close()
+            await node.stop()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("invalidation", ["expiry", "tip"])
+def test_mempool_snapshot_expiry_and_changed_tip_do_not_reuse_old_cursor(invalidation):
+    async def scenario():
+        node = Node(config(snapshot_idle_timeout=0.05))
+        peer = None
+        try:
+            await node.start()
+            funding = await mine(node)
+            parent = transfer(funding.transactions[0])
+            child = transfer(parent, KEYS[1], [(40, CAROL)])
+            assert await node.submit_transaction(parent)
+            assert await node.submit_transaction(child)
+            peer = await WirePeer.connect(node, height=1, tip_hash=funding.hash())
+            first_id = secrets.token_hex(16)
+            await peer.send("GET_MEMPOOL", {
+                "tip_hash": funding.hash(), "snapshot_id": None, "cursor": 0, "limit": 1,
+            }, first_id)
+            first = (await peer.receive("MEMPOOL", request_id=first_id))["payload"]
+            assert first["transactions"] == [item(parent)] and not first["done"]
+            assert first["next_cursor"] == 1
+            if invalidation == "expiry":
+                await wait_until(lambda: not node._sync.exports)
+                expected = "SNAPSHOT_EXPIRED"
+            else:
+                await mine(node, MINER, max_transactions=1)
+                expected = "STALE_TIP"
+            next_id = secrets.token_hex(16)
+            await peer.send("GET_MEMPOOL", {
+                "tip_hash": funding.hash(), "snapshot_id": first["snapshot_id"],
+                "cursor": first["next_cursor"], "limit": 1,
+            }, next_id)
+            response = await peer.receive("ERROR", request_id=next_id)
+            assert response["payload"]["code"] == expected
+            assert node._sync.snapshot_bytes == 0
+            assert node.state == "RUNNING"
+        finally:
+            if peer:
+                await peer.close()
+            await node.stop()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "no_progress"])
+def test_false_height_source_yields_and_late_reply_is_ignored(failure):
+    async def scenario():
+        target = Node(config(request_timeout=0.08, retry_delay=0.15,
+                             maintenance_interval=0.01))
+        source = Node(config())
+        liar = None
+        try:
+            await target.start()
+            await source.start()
+            blocks = [await mine(source), await mine(source)]
+            liar = await WirePeer.connect(target, height=999, tip_hash="f" * 64)
+            expired = await liar.receive("GET_BLOCKS")
+            await target.connect(*source.endpoint)
+            if failure == "no_progress":
+                await respond_blocks(liar, expired, [], (0, GENESIS_HASH))
+            await wait_status(target, lambda s: s["height"] == 2)
+            # Even valid blocks cannot revive a request owned by an expired
+            # download; the already verified chain remains the only state.
+            if failure == "timeout":
+                await respond_blocks(liar, expired, blocks, (2, blocks[-1].hash()))
+            assert (await liar.barrier())["height"] == 2
+            assert (await target.get_status())["tip_hash"] == blocks[-1].hash()
+            assert await target.get_balance(ALICE) == 100
+            assert target.state == "RUNNING" and await target.validate_chain()
+        finally:
+            if liar:
+                await liar.close()
+            await close_nodes(target, source)
+    asyncio.run(scenario())
+
+
+def test_response_from_wrong_connection_cannot_use_another_peers_request_id():
+    blocks = chain_blocks(2)
+
+    async def scenario():
+        node = Node(config())
+        source, attacker = None, None
+        try:
+            await node.start()
+            source = await WirePeer.connect(node, height=2, tip_hash=blocks[-1].hash())
+            request = await source.receive("GET_BLOCKS")
+            attacker = await WirePeer.connect(node)
+            await respond_blocks(attacker, request, blocks, (2, blocks[-1].hash()))
+            await wait_status(node, lambda s: all(
+                p["node_id"] != attacker.node_id for p in s["peers"]
+            ))
+            assert (await node.get_status())["height"] == 0
+            await respond_blocks(source, request, blocks, (2, blocks[-1].hash()))
+            await wait_status(node, lambda s: s["height"] == 2)
+            assert await node.validate_chain()
+        finally:
+            for peer in (source, attacker):
+                if peer:
+                    await peer.close()
+            await node.stop()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("limit", ["count", "bytes"])
+def test_incoming_mempool_limit_covers_all_pages_and_keeps_accepted_prefix(limit):
+    funding = chain_blocks(1)[0]
+    parent = transfer(funding.transactions[0])
+    child = transfer(parent, KEYS[1], [(40, CAROL)])
+
+    async def scenario():
+        limits = ({"snapshot_max_transactions": 1} if limit == "count" else
+                  {"snapshot_max_bytes": len(encode_transaction(parent)) + 1})
+        node = Node(config(**limits))
+        peer = None
+        try:
+            await node.start()
+            assert await node.accept_block(funding)
+            peer = await WirePeer.connect(node, height=1, tip_hash=funding.hash())
+            request = await peer.receive("GET_MEMPOOL")
+            token = secrets.token_hex(16)
+            await peer.send("MEMPOOL", {
+                "tip_hash": funding.hash(), "snapshot_id": token,
+                "cursor": 0, "transactions": [item(parent)], "next_cursor": 1, "done": False,
+            }, request["request_id"])
+            second = await peer.receive("GET_MEMPOOL")
+            assert second["payload"]["snapshot_id"] == token
+            assert second["payload"]["cursor"] == 1
+            await peer.send("MEMPOOL", {
+                "tip_hash": funding.hash(), "snapshot_id": token,
+                "cursor": 1, "transactions": [item(child)], "next_cursor": 2, "done": True,
+            }, second["request_id"])
+            await wait_status(node, lambda s: len(s["peers"]) == 0)
+            assert await node.get_pending_transactions() == [parent]
+            assert node.state == "RUNNING"
+        finally:
+            if peer:
+                await peer.close()
+            await node.stop()
     asyncio.run(scenario())

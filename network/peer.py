@@ -144,12 +144,15 @@ class PeerConnection:
     async def _read_loop(self) -> None:
         try:
             while not self.closed:
+                # Read prefix
                 prefix = await asyncio.wait_for(
                     self.reader.readexactly(4), timeout=self.config.read_timeout
                 )
+                # Change body size to int
                 body_size = int.from_bytes(prefix, "big")
                 if not 1 <= body_size <= self.config.max_frame_bytes:
                     raise ProtocolError("frame length outside transport limits")
+                # Wire_size
                 wire_size = body_size + 4
                 if not self._message_bucket.consume() or not self._byte_bucket.consume(
                     wire_size
@@ -159,21 +162,20 @@ class PeerConnection:
                     self.close_reason = "global inbound queue limit"
                     return
                 owned_size = wire_size
+                # Read body and passes to _on_message
                 try:
                     body = await asyncio.wait_for(
-                        self.reader.readexactly(body_size),
-                        timeout=self.config.body_timeout,
+                        self.reader.readexactly(body_size), timeout=self.config.body_timeout
                     )
-                    message = decode_message(
-                        body, max_frame_bytes=self.config.max_frame_bytes
-                    )
+                    # Decode the message
+                    message = decode_message(body, max_frame_bytes=self.config.max_frame_bytes)
                     self.last_received = self._clock()
+                    # passes to _on_message
                     if self._on_message(self, message, wire_size):
                         owned_size = 0
                 finally:
                     if owned_size:
                         self._release(owned_size)
-                # readexactly can complete synchronously for buffered frames.
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
@@ -200,7 +202,6 @@ class PeerConnection:
                     self._outbound_frames -= 1
                     self._outbound_bytes -= len(frame)
                     self._outbound.task_done()
-                # drain can complete synchronously for a writable transport.
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
@@ -255,6 +256,12 @@ class PeerConnection:
                 )
             except (OSError, TimeoutError):
                 # Abort after the bounded graceful close deadline.
+                transport = getattr(self.writer, "transport", None)
+                if transport is not None:
+                    transport.abort()
+            except Exception as exc:
+                self.unexpected_error = self.unexpected_error or exc
+                logger.exception("peer wait_closed failed connection=%s", self.connection_id)
                 transport = getattr(self.writer, "transport", None)
                 if transport is not None:
                     transport.abort()

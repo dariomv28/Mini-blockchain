@@ -160,6 +160,8 @@ class NodeConfig:
         ):
             if getattr(self, name) > maximum:
                 raise ValueError(f"{name} exceeds protocol maximum {maximum}")
+        if len(self.seeds) > self.max_candidates:
+            raise ValueError("unique seeds exceed max_candidates")
         if self.reconnect_initial > self.reconnect_max:
             raise ValueError("reconnect_initial must not exceed reconnect_max")
 

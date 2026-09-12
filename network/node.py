@@ -49,6 +49,7 @@ class Session:
     created: float
     service_bucket: TokenBucket
     endpoint: tuple[str, int] | None = None
+    dial_endpoint: tuple[str, int] | None = None
     version_received: bool = False
     ack_received: bool = False
     remote_height: int = 0
@@ -65,6 +66,7 @@ class Session:
     sync_after: float = 0.0
     sync_state: str = "IDLE"
     error: str | None = None
+    rejected_anchor: tuple[int, str] | None = None
 
 
 @dataclass
@@ -94,6 +96,7 @@ class Node:
         self._loop = None
         self._chain: Blockchain | None = None
         self._server = None
+        self._start_task = None
         self._dispatcher_task = None
         self._maintenance_task = None
         self._cleanup_task = None
@@ -116,6 +119,8 @@ class Node:
             raise RuntimeError("Node APIs must run on the event loop that started it")
 
     def _ensure_running(self):
+        if self._loop is None:
+            raise NodeClosedError("Node has not been started")
         self._ensure_loop()
         if self.state == "FAILED" and isinstance(self._failure, StorageError):
             raise StorageError("Node storage failed; stop and open a new node") from self._failure
@@ -127,35 +132,44 @@ class Node:
             raise NodeClosedError("A Node instance can only be started once")
         self._loop = asyncio.get_running_loop()
         self.state = "STARTING"
+        self._start_task = asyncio.create_task(self._startup(), name=f"node-start-{self.node_id}")
         try:
-            self._chain = Blockchain(
-                db_path=self.config.db_path,
-                mempool_max_transactions=self.config.mempool_max_transactions,
-                mempool_max_bytes=self.config.mempool_max_bytes,
-            )
-            self._server = await asyncio.start_server(
-                self._accepted_socket, self.config.host, self.config.port,
-                limit=min(self.config.max_frame_bytes, 64 * 1024),
-                start_serving=False,
-            )
-            address = self._server.sockets[0].getsockname()
-            self.endpoint = (address[0], address[1])
-            self._manager.set_self_endpoint(self.endpoint)
-            self.state = "RUNNING"
-            self._dispatcher_task = asyncio.create_task(
-                self._dispatch_loop(), name=f"node-dispatch-{self.node_id}")
-            self._maintenance_task = asyncio.create_task(
-                self._maintenance_loop(), name=f"node-timer-{self.node_id}")
-            await self._server.start_serving()
-            for endpoint in self.config.seeds:
-                self._manager.add_candidate(endpoint, seed=True)
-            logger.info("node started id=%s endpoint=%s storage=%s", self.node_id,
-                        self.endpoint, "sqlite" if self.config.db_path is not None else "ram")
+            await asyncio.shield(self._start_task)
         except BaseException as error:
-            self._failure = error
-            self.state = "FAILED"
+            if self.state not in {"STOPPING", "STOPPED"}:
+                self._failure = self._failure or error
+                self.state = "FAILED"
             await asyncio.shield(self._begin_stop())
             raise
+
+    async def _startup(self):
+        self._chain = Blockchain(
+            db_path=self.config.db_path,
+            mempool_max_transactions=self.config.mempool_max_transactions,
+            mempool_max_bytes=self.config.mempool_max_bytes,
+        )
+        self._server = await asyncio.start_server(
+            self._accepted_socket, self.config.host, self.config.port,
+            limit=min(self.config.max_frame_bytes, 64 * 1024), start_serving=False,
+        )
+        if self.state != "STARTING":
+            self._server.close()
+            raise NodeClosedError("Node stopped during startup")
+        address = self._server.sockets[0].getsockname()
+        self.endpoint = (address[0], address[1])
+        self._manager.set_self_endpoint(self.endpoint)
+        self.state = "RUNNING"
+        self._dispatcher_task = asyncio.create_task(
+            self._dispatch_loop(), name=f"node-dispatch-{self.node_id}")
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_loop(), name=f"node-timer-{self.node_id}")
+        await self._server.start_serving()
+        if self.state != "RUNNING":
+            raise NodeClosedError("Node stopped before startup completed")
+        for endpoint in self.config.seeds:
+            self._manager.add_candidate(endpoint, seed=True)
+        logger.info("node started id=%s endpoint=%s storage=%s", self.node_id,
+                    self.endpoint, "sqlite" if self.config.db_path is not None else "ram")
 
     async def stop(self):
         if self._loop is None:
@@ -183,7 +197,7 @@ class Node:
         # The supervisor, not the dispatcher, joins/cancels owned tasks.
         if self._server is not None:
             self._server.close()
-        tasks = [t for t in (self._maintenance_task, self._dispatcher_task)
+        tasks = [t for t in (self._start_task, self._maintenance_task, self._dispatcher_task)
                  if t is not None]
         tasks.extend(self._dial_tasks.values())
         for task in tasks:
@@ -191,6 +205,8 @@ class Node:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._server is not None:
+            self._server.close()
         peers = [s.peer for s in self._sessions.values()]
         if peers:
             await asyncio.gather(*(p.close() for p in peers), return_exceptions=True)
@@ -306,7 +322,7 @@ class Node:
                     return session.peer
         task = self._dial_tasks.get(endpoint)
         if task is None:
-            if (len(self._sessions) + len(self._dial_tasks) >= self.config.max_peers
+            if (self._occupied_slots() >= self.config.max_peers
                     or len(self._dial_tasks) >= self.config.max_concurrent_dials):
                 raise NodeBusyError("Peer or concurrent dial slots are full")
             self._manager.add_candidate(endpoint)
@@ -323,6 +339,12 @@ class Node:
             # Retrieving background dial errors avoids unhandled-task warnings;
             # explicit callers awaiting the same task still receive the error.
             task.exception()
+
+    def _occupied_slots(self):
+        # Once a socket is attached it already occupies a session slot, even
+        # though its dial task still waits for VERSION/VERACK completion.
+        attached = {s.dial_endpoint for s in self._sessions.values() if s.dial_endpoint is not None}
+        return len(self._sessions) + sum(endpoint not in attached for endpoint in self._dial_tasks)
 
     async def _dial(self, endpoint):
         session = None
@@ -360,7 +382,7 @@ class Node:
         remote = writer.get_extra_info("peername")
         try:
             if (self.state != "RUNNING" or remote is None
-                    or len(self._sessions) + len(self._dial_tasks) >= self.config.max_peers):
+                    or self._occupied_slots() >= self.config.max_peers):
                 raise NodeBusyError("No inbound peer slot")
             self.config.validate_host(remote[0])
         except (ValueError, NetworkError):
@@ -379,7 +401,8 @@ class Node:
         now = self._clock()
         session = Session(peer, self._loop.create_future(), now,
                           TokenBucket(self.config.service_rate, self.config.service_burst, clock=self._clock),
-                          endpoint=endpoint, next_ping=now + self.config.ping_interval)
+                          endpoint=endpoint, dial_endpoint=endpoint if outbound else None,
+                          next_ping=now + self.config.ping_interval)
         self._sessions[peer.connection_id] = session
         height, tip = self._tip()
         self._send(session, Message("VERSION", {
@@ -529,6 +552,8 @@ class Node:
             if payload["height"] == 0 and payload["tip_hash"] != GENESIS_HASH:
                 raise ProtocolError("Invalid genesis tip")
             endpoint = self.config.validate_endpoint(peer.endpoint[0], payload["listen_port"])
+            if peer.outbound and endpoint != session.dial_endpoint:
+                raise ProtocolError("Outbound peer advertises a different listen endpoint")
             session.endpoint = endpoint
             peer.node_id, peer.remote_nonce = payload["node_id"], payload["connection_nonce"]
             session.remote_height, session.remote_tip = payload["height"], payload["tip_hash"]
@@ -606,6 +631,15 @@ class Node:
                 raise ProtocolError("Invalid genesis status")
             session.remote_height = message.payload["height"]
             session.remote_tip = message.payload["tip_hash"]
+            if session.rejected_anchor is not None and request is not None:
+                anchor_height, anchor_hash = session.rejected_anchor
+                if (self._tip() == (anchor_height, anchor_hash)
+                        and session.remote_height >= anchor_height):
+                    # This is an unsupported peer view, not proof that its
+                    # claimed fork is valid. Never replace our chain with it.
+                    session.sync_state = "DIVERGED"
+                    session.error = "FORK_UNSUPPORTED"
+                session.rejected_anchor = None
         elif message.type == "PEERS":
             for endpoint in message.payload["peers"]:
                 try:
@@ -733,7 +767,7 @@ class Node:
             if (endpoint == self.endpoint or endpoint in self._dial_tasks
                     or any(s.endpoint == endpoint and not s.peer.closed for s in self._sessions.values())):
                 continue
-            if (len(self._sessions) + len(self._dial_tasks) >= self.config.max_peers
+            if (self._occupied_slots() >= self.config.max_peers
                     or len(self._dial_tasks) >= self.config.max_concurrent_dials):
                 break
             self._manager.mark_attempt(endpoint)
