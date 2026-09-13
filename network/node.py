@@ -295,8 +295,34 @@ class Node:
     async def get_block_by_height(self, height):
         return await self._call("get_block", height)
 
+    async def get_latest_block(self):
+        return await self._call("get_latest_block")
+
+    async def get_latest_block_info(self):
+        return await self._call("get_latest_block_info")
+
+    async def get_block_by_hash(self, block_hash: str):
+        return await self._call("get_block_hash", block_hash)
+
+    async def get_block_info_by_hash(self, block_hash: str):
+        return await self._call("get_block_info_by_hash", block_hash)
+
+    async def get_utxos_for_address(self, address: str):
+        return await self._call("utxos", address)
+
+    async def get_address_info(self, address: str):
+        return await self._call("address_info", address)
+
+    async def get_blocks(self, start_height: int, limit: int):
+        return await self._call("blocks", (start_height, limit))
+
+    async def find_transaction(self, txid: str):
+        return await self._call("find_transaction", txid)
+
     async def get_balance(self, address):
         return await self._call("balance", address)
+
+
 
     async def get_pending_transactions(self):
         return await self._call("pending")
@@ -668,7 +694,26 @@ class Node:
             return self._status()
         if event.kind == "get_block":
             return self._chain.get_block_by_height(event.value)
+        if event.kind == "get_latest_block":
+            return self._chain.get_latest_block()
+        if event.kind == "get_latest_block_info":
+            return self._chain.get_latest_block_info()
+        if event.kind == "get_block_hash":
+            return self._chain.get_block_by_hash(event.value)
+        if event.kind == "get_block_info_by_hash":
+            return self._chain.get_block_info_by_hash(event.value)
+        if event.kind == "utxos":
+            return self._chain.get_utxos_for_address(event.value)
+        if event.kind == "address_info":
+            return self._chain.get_address_info(event.value)
+
+        if event.kind == "blocks":
+            start, limit = event.value
+            return self._chain.get_blocks(start, limit)
+        if event.kind == "find_transaction":
+            return self._chain.find_transaction(event.value)
         if event.kind == "balance":
+
             return self._chain.get_balance(event.value)
         if event.kind == "pending":
             return self._chain.mempool.get_transactions()

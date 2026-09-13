@@ -331,3 +331,72 @@ class Blockchain:
             and rebuilt.seen_txids == self._state.seen_txids
             and rebuilt.utxo_set.to_dict() == self._state.utxo_set.to_dict()
         )
+
+    def get_blocks(self, start_height: int, limit: int) -> list[Block]:
+        self._ensure_usable()
+        if type(start_height) is not int or type(limit) is not int:
+            return []
+        if start_height < 0 or limit < 1 or limit > 100:
+            return []
+        if start_height >= len(self._blocks):
+            return []
+        end_height = min(start_height + limit, len(self._blocks))
+        return [deepcopy(block) for block in self._blocks[start_height:end_height]]
+
+    def get_latest_block_info(self) -> dict | None:
+        self._ensure_usable()
+        if not self._blocks:
+            return None
+        return {
+            "block": deepcopy(self._blocks[-1]),
+            "height": len(self._blocks) - 1,
+        }
+
+    def get_block_info_by_hash(self, block_hash: str) -> dict | None:
+        self._ensure_usable()
+        if not isinstance(block_hash, str):
+            return None
+        for height, block in enumerate(self._blocks):
+            if block.hash() == block_hash:
+                return {
+                    "block": deepcopy(block),
+                    "height": height,
+                }
+        return None
+
+    def get_address_info(self, address: str) -> dict:
+        self._ensure_usable()
+        utxos = self._state.utxo_set.get_utxos_for_address(address)
+        balance = self._state.utxo_set.get_balance(address)
+        return {
+            "address": address,
+            "confirmed_balance": balance,
+            "utxos": utxos,
+            "utxo_count": len(utxos),
+        }
+
+
+    def find_transaction(self, txid: str) -> dict | None:
+        self._ensure_usable()
+        if not isinstance(txid, str):
+            return None
+        mempool_tx = self._mempool.get_transaction(txid)
+        if mempool_tx is not None:
+            return {
+                "transaction": mempool_tx,
+                "status": "pending",
+                "height": None,
+                "block_hash": None,
+            }
+        if txid in self._state.seen_txids:
+            for height, block in enumerate(self._blocks):
+                for tx in block.transactions:
+                    if tx.txid() == txid:
+                        return {
+                            "transaction": deepcopy(tx),
+                            "status": "confirmed",
+                            "height": height,
+                            "block_hash": block.hash(),
+                        }
+        return None
+

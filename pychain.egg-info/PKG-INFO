@@ -1,0 +1,60 @@
+Metadata-Version: 2.4
+Name: pychain
+Version: 0.1.0
+Summary: A Bitcoin-like educational blockchain implementation in Python
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: ecdsa>=0.19.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn[standard]>=0.28.0
+Requires-Dist: pydantic>=2.6.0
+Requires-Dist: pydantic-settings>=2.2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: httpx>=0.27.0; extra == "dev"
+
+# PyChain — Educational Bitcoin-like Blockchain
+
+PyChain is an educational cryptocurrency and blockchain platform written in Python. It features a UTXO model, ECDSA (SECP256k1) cryptography, Proof of Work (PoW) consensus, mempool with ancestor-fee selection, SQLite persistence, and an asynchronous peer-to-peer (P2P) gossip network.
+
+Phase 10 introduces the **Web API Foundation** using FastAPI and WebSockets, exposing public node endpoints without breaking the core blockchain abstraction.
+
+## Installation
+
+Install dependencies using `pip`:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install the package in development mode:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Running the API Server
+
+Start the API server running an embedded PyChain node with SQLite storage:
+
+```bash
+python run_api.py
+```
+
+Or with `uvicorn`:
+
+```bash
+uvicorn api.app:app --host 127.0.0.1 --port 8000
+```
+
+Interactive API documentation will be available at:
+- **Swagger UI:** `http://127.0.0.1:8000/docs`
+- **ReDoc:** `http://127.0.0.1:8000/redoc`
+
+## Running Tests
+
+Run the test suite using pytest:
+
+```bash
+python -m pytest
+```
