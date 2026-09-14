@@ -400,3 +400,29 @@ class Blockchain:
                         }
         return None
 
+    def get_wallet_history(self, address: str, *, start=0, limit=20) -> list[dict]:
+        self._ensure_usable()
+        if type(start) is not int or start < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Invalid wallet history pagination")
+        sources, records = {}, []
+
+        def inspect(tx, height):
+            txid = tx.txid()
+            previous = [sources.get((item.previous_tx_id, item.output_index)) for item in tx.inputs]
+            sent = any(output is not None and output.recipient_address == address for output in previous)
+            received = sum(output.amount for output in tx.outputs if output.recipient_address == address)
+            if sent or received:
+                amount = sum(output.amount for output in tx.outputs if output.recipient_address != address) if sent else received
+                records.append({"txid": txid, "status": "pending" if height is None else "confirmed",
+                                "direction": "sent" if sent else "received", "amount": amount,
+                                "timestamp": tx.timestamp, "block_height": height})
+            for index, output in enumerate(tx.outputs):
+                sources[(txid, index)] = output
+
+        for height, block in enumerate(self._blocks):
+            for tx in block.transactions:
+                inspect(tx, height)
+        for tx in self._mempool.get_transactions():
+            inspect(tx, None)
+        records.reverse()
+        return records[start:start + limit]

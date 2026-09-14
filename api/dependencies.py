@@ -23,7 +23,7 @@ def get_node(request: Request) -> Node:
     return node
 
 
-def verify_admin_token(
+async def verify_admin_token(
     request: Request,
     authorization: str | None = Header(default=None),
     config: ApiConfig = Depends(get_config),
@@ -45,5 +45,11 @@ def verify_admin_token(
         raise APIError(status.HTTP_403_FORBIDDEN, "FORBIDDEN", "Invalid admin credentials")
     if not secrets.compare_digest(token, config.admin_token):
         raise APIError(status.HTTP_403_FORBIDDEN, "FORBIDDEN", "Invalid admin credentials")
+
+    # Bearer-only native clients do not use ambient browser credentials. When
+    # a browser session cookie is present, enforce its CSRF protection too.
+    if request.cookies.get("pychain_session"):
+        from auth.dependencies import verify_csrf
+        await verify_csrf(request)
 
     return True

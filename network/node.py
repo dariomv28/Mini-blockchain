@@ -313,6 +313,14 @@ class Node:
     async def get_address_info(self, address: str):
         return await self._call("address_info", address)
 
+    async def get_wallet_state(self, address: str):
+        return await self._call("wallet_state", address)
+
+    async def get_wallet_history(self, address: str, *, start=0, limit=20):
+        if type(start) is not int or start < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Invalid wallet history pagination")
+        return await self._call("wallet_history", (address, start, limit))
+
     async def get_blocks(self, start_height: int, limit: int):
         return await self._call("blocks", (start_height, limit))
 
@@ -706,6 +714,13 @@ class Node:
             return self._chain.get_utxos_for_address(event.value)
         if event.kind == "address_info":
             return self._chain.get_address_info(event.value)
+        if event.kind == "wallet_state":
+            view = self._chain.get_address_info(event.value)
+            view["pending"] = self._chain.mempool.get_transactions()
+            return view
+        if event.kind == "wallet_history":
+            address, start, limit = event.value
+            return self._chain.get_wallet_history(address, start=start, limit=limit)
 
         if event.kind == "blocks":
             start, limit = event.value

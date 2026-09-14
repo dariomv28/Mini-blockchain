@@ -11,6 +11,8 @@ from api.middleware.rate_limiter import InMemoryRateLimiterMiddleware
 from api.middleware.size_limit import RequestSizeLimitMiddleware
 from api.routes import api_v1_router
 from api.routes.admin import router as admin_router
+from api.routes.auth import router as auth_router
+from api.routes.wallet import router as wallet_router
 
 
 def create_app(config: ApiConfig | None = None) -> FastAPI:
@@ -52,6 +54,8 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
 
     # Include public API v1 routers
     app.include_router(api_v1_router)
+    app.include_router(auth_router, prefix="/api/v1")
+    app.include_router(wallet_router, prefix="/api/v1")
 
     # Conditionally include admin routes: ONLY when BOTH enable_admin_routes AND demo_mode are True
     if config.enable_admin_routes and config.demo_mode:

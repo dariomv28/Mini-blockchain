@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from network.config import NodeConfig
 
@@ -26,6 +26,11 @@ class ApiConfig(BaseSettings):
     node_host: str = Field(default="127.0.0.1", alias="PYC_NODE_HOST")
     node_port: int = Field(default=5001, alias="PYC_NODE_PORT")
     node_seeds: Any = Field(default_factory=list, alias="PYC_NODE_SEEDS")
+    app_db: str = Field(default="data/app.sqlite3", alias="PYC_APP_DB")
+    wallet_master_key: SecretStr | None = Field(default=None, alias="PYC_WALLET_MASTER_KEY")
+    jwt_secret: SecretStr | None = Field(default=None, alias="PYC_JWT_SECRET")
+    cookie_secure: bool = Field(default=False, alias="PYC_COOKIE_SECURE")
+    session_seconds: int = Field(default=3600, ge=60, le=86400, alias="PYC_SESSION_SECONDS")
 
     frontend_origin: str = Field(default="http://localhost:5173", alias="PYC_FRONTEND_ORIGIN")
     enable_admin_routes: bool = Field(default=False, alias="PYC_ENABLE_ADMIN_ROUTES")
