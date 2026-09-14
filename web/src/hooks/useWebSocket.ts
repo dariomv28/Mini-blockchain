@@ -2,6 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { NodeStatus } from "../types/api";
 
+type WebSocketEventListener = (event: { type: string; payload?: any; [key: string]: any }) => void;
+const eventListeners = new Set<WebSocketEventListener>();
+
+export function addWebSocketListener(listener: WebSocketEventListener): () => void {
+  eventListeners.add(listener);
+  return () => {
+    eventListeners.delete(listener);
+  };
+}
+
 export function useWebSocket() {
   const queryClient = useQueryClient();
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -47,6 +57,16 @@ export function useWebSocket() {
 
         try {
           const parsed = JSON.parse(msg);
+
+          // Dispatch to all registered listeners
+          for (const listener of eventListeners) {
+            try {
+              listener(parsed);
+            } catch {
+              // Ignore listener error
+            }
+          }
+
           if (parsed.type === "node_status" || parsed.event === "node_status") {
             const statusData: NodeStatus = parsed.payload || parsed.data || parsed;
             setNodeStatus(statusData);
@@ -64,13 +84,18 @@ export function useWebSocket() {
               pending_count: statusData.pending_count,
             };
 
-            // Only invalidate when node/chain state actually changed (e.g. block mined or tx in mempool)
+            // Only invalidate when node/chain state actually changed
             const now = Date.now();
             if (hasChanged && now - lastInvalidateTimeRef.current >= 1500) {
               lastInvalidateTimeRef.current = now;
-              // Invalidating prefix ["wallet"] covers both wallet summary and wallet transactions once
               queryClient.invalidateQueries({ queryKey: ["wallet"] });
+              queryClient.invalidateQueries({ queryKey: ["mempool"] });
+              queryClient.invalidateQueries({ queryKey: ["mining"] });
             }
+          } else if (parsed.type === "block_accepted") {
+            queryClient.invalidateQueries({ queryKey: ["wallet"] });
+            queryClient.invalidateQueries({ queryKey: ["mempool"] });
+            queryClient.invalidateQueries({ queryKey: ["mining"] });
           }
         } catch {
           // Ignore non-JSON

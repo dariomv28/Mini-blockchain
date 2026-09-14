@@ -2,7 +2,7 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { ArrowDownLeft, ArrowUpRight, Cpu, Globe, LayoutDashboard, LogOut, Radio, User as UserIcon } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Cpu, Globe, Hammer, LayoutDashboard, LogOut, Radio, User as UserIcon } from "lucide-react";
 
 export const Navbar: React.FC = () => {
   const { user, logout } = useAuth();
@@ -11,6 +11,7 @@ export const Navbar: React.FC = () => {
 
   const navItems = [
     { name: "Dashboard", path: "/app", icon: LayoutDashboard },
+    { name: "Mining", path: "/app/mining", icon: Hammer },
     { name: "Send", path: "/app/send", icon: ArrowUpRight },
     { name: "Receive", path: "/app/receive", icon: ArrowDownLeft },
   ];
@@ -55,14 +56,7 @@ export const Navbar: React.FC = () => {
               );
             })}
 
-            {/* Teasers for Phase 13/14 */}
-            <span
-              title="Coming in Phase 13"
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-slate-500 cursor-not-allowed opacity-60"
-            >
-              <Cpu className="w-3.5 h-3.5" />
-              Mining
-            </span>
+            {/* Teaser for Phase 14 */}
             <span
               title="Coming in Phase 14"
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-slate-500 cursor-not-allowed opacity-60"

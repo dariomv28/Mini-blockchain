@@ -8,6 +8,7 @@ import { RegisterPage } from "./pages/RegisterPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { SendPage } from "./pages/SendPage";
 import { ReceivePage } from "./pages/ReceivePage";
+import { MiningPage } from "./pages/MiningPage";
 
 export const App: React.FC = () => {
   return (
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
           <Route element={<ProtectedRoute />}>
             <Route element={<AppShell />}>
               <Route path="/app" element={<DashboardPage />} />
+              <Route path="/app/mining" element={<MiningPage />} />
               <Route path="/app/send" element={<SendPage />} />
               <Route path="/app/receive" element={<ReceivePage />} />
             </Route>

@@ -13,6 +13,7 @@ from api.routes import api_v1_router
 from api.routes.admin import router as admin_router
 from api.routes.auth import router as auth_router
 from api.routes.wallet import router as wallet_router
+from api.routes.mining import router as mining_router
 
 
 def create_app(config: ApiConfig | None = None) -> FastAPI:
@@ -52,7 +53,7 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(allowed_origins),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -63,6 +64,7 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
     app.include_router(api_v1_router)
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(wallet_router, prefix="/api/v1")
+    app.include_router(mining_router, prefix="/api/v1")
 
     # Conditionally include admin routes: ONLY when BOTH enable_admin_routes AND demo_mode are True
     if config.enable_admin_routes and config.demo_mode:

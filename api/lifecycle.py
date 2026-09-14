@@ -18,6 +18,7 @@ from auth.service import AuthService
 from auth.token import TokenService
 from wallet.keystore import KeyStore
 from wallet.service import WalletService
+from api.services.mining_service import MiningService
 
 logger = logging.getLogger("pychain.api.lifecycle")
 
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
     node = None
     ws_manager: WebSocketManager | None = None
     wallet_service = None
+    mining_service = None
     try:
         keystore.validate_database(database)
         dummy_hash = await asyncio.to_thread(hash_password, secrets.token_urlsafe(32))
@@ -77,10 +79,17 @@ async def lifespan(app: FastAPI):
         ws_manager = WebSocketManager(config)
         await ws_manager.start(node)
         app.state.ws_manager = ws_manager
-        logger.info("PyChain Node and WebSocket manager started successfully.")
+        mining_service = MiningService(node, ws_manager, config)
+        app.state.mining_service = mining_service
+        logger.info("PyChain Node, WebSocket manager, and Mining service started successfully.")
         yield
     finally:
         logger.info("Shutting down PyChain API and embedded node...")
+        if mining_service is not None:
+            try:
+                await mining_service.close()
+            except Exception as exc:
+                logger.error("Error stopping MiningService: %s", exc)
         if wallet_service is not None:
             await wallet_service.close()
         if ws_manager is not None:
