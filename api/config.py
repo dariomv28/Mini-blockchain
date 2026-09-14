@@ -15,6 +15,7 @@ class ApiConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="PYC_",
         env_file=".env",
+        env_file_encoding="utf-8-sig",
         extra="ignore",
         populate_by_name=True,
     )

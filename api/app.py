@@ -41,9 +41,16 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
         mutation_limit=config.rate_limit_mutation_per_minute,
         admin_limit=config.rate_limit_admin_per_minute,
     )
+    allowed_origins = {config.frontend_origin.rstrip("/")}
+    for item in list(allowed_origins):
+        if "localhost" in item:
+            allowed_origins.add(item.replace("localhost", "127.0.0.1"))
+        elif "127.0.0.1" in item:
+            allowed_origins.add(item.replace("127.0.0.1", "localhost"))
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[config.frontend_origin.rstrip("/")],
+        allow_origins=list(allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],

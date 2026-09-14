@@ -48,9 +48,16 @@ async def get_current_user(request: Request):
 
 async def verify_csrf(request: Request):
     origin = request.headers.get("origin")
-    allowed = {request.app.state.config.frontend_origin, str(request.base_url).rstrip("/")}
-    if origin is not None and origin not in allowed:
-        raise APIError(403, "CSRF_FAILED", "Invalid request origin")
+    if origin is not None:
+        clean_origin = origin.rstrip("/")
+        allowed = {request.app.state.config.frontend_origin.rstrip("/"), str(request.base_url).rstrip("/")}
+        for item in list(allowed):
+            if "localhost" in item:
+                allowed.add(item.replace("localhost", "127.0.0.1"))
+            elif "127.0.0.1" in item:
+                allowed.add(item.replace("127.0.0.1", "localhost"))
+        if clean_origin not in allowed:
+            raise APIError(403, "CSRF_FAILED", "Invalid request origin")
     header = request.headers.get("x-csrf-token", "")
     cookie = request.cookies.get(CSRF_COOKIE, "")
     if not header or len(header) > 256 or not header.isascii() or not cookie.isascii() or not hmac.compare_digest(header, cookie):

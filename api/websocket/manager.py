@@ -50,8 +50,13 @@ class WebSocketManager:
         if not origin:
             # Native or testing non-browser clients omitting Origin are allowed
             return True
-        allowed = self.config.frontend_origin.rstrip("/")
-        return origin.rstrip("/") == allowed
+        allowed = {self.config.frontend_origin.rstrip("/")}
+        for item in list(allowed):
+            if "localhost" in item:
+                allowed.add(item.replace("localhost", "127.0.0.1"))
+            elif "127.0.0.1" in item:
+                allowed.add(item.replace("127.0.0.1", "localhost"))
+        return origin.rstrip("/") in allowed
 
     async def start(self, node: Node) -> None:
         self._running = True
