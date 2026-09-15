@@ -22,6 +22,7 @@ export const MempoolTable: React.FC<MempoolTableProps> = ({
     setTimeout(() => setCopiedTxid(null), 2000);
   };
 
+  const hasDeterminedFees = txList.every((tx) => typeof tx.fee === "number");
   const totalFees = txList.reduce((acc, tx) => acc + (tx.fee || 0), 0);
 
   return (
@@ -107,8 +108,12 @@ export const MempoolTable: React.FC<MempoolTableProps> = ({
                         <Clock className="w-3 h-3 text-slate-500" />
                         {new Date(tx.timestamp * 1000).toLocaleTimeString()}
                       </td>
-                      <td className="py-2.5 px-3 text-right text-emerald-400 font-semibold">
-                        +{tx.fee ?? 0} PYC
+                      <td className="py-2.5 px-3 text-right font-semibold">
+                        {typeof tx.fee === "number" ? (
+                          <span className="text-emerald-400">+{tx.fee} PYC</span>
+                        ) : (
+                          <span className="text-slate-500 font-sans italic text-[11px]">Chưa xác định</span>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-right text-slate-200">
                         {outputTotal} PYC
@@ -126,7 +131,11 @@ export const MempoolTable: React.FC<MempoolTableProps> = ({
       {txList.length > 0 && (
         <div className="pt-3 border-t border-slate-800/80 mt-auto flex items-center justify-between text-xs">
           <span className="text-slate-400">Total Pending Fees:</span>
-          <span className="font-mono font-bold text-emerald-400">+{totalFees} PYC</span>
+          {hasDeterminedFees ? (
+            <span className="font-mono font-bold text-emerald-400">+{totalFees} PYC</span>
+          ) : (
+            <span className="text-slate-500 font-sans italic">Chưa xác định</span>
+          )}
         </div>
       )}
     </div>

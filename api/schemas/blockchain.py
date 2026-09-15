@@ -24,6 +24,7 @@ class TransactionResponse(BaseModel):
     inputs: list[TxInputModel] = Field(default_factory=list, description="List of transaction inputs")
     outputs: list[TxOutputModel] = Field(..., description="List of transaction outputs")
     is_coinbase: bool = Field(default=False, description="True if this is a block coinbase reward")
+    fee: int | None = Field(default=None, description="Transaction fee in PYC")
 
 
 class BlockHeaderModel(BaseModel):

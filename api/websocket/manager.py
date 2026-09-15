@@ -174,7 +174,7 @@ class WebSocketManager:
                     "peer_count": len(status_data["peers"]),
                 },
             }
-            queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+            queue: asyncio.Queue = asyncio.Queue(maxsize=getattr(self.config, "ws_client_queue_size", 64))
             queue.put_nowait(initial_msg)
             done_event = asyncio.Event()
             writer_task = asyncio.create_task(
@@ -264,7 +264,23 @@ class WebSocketManager:
             try:
                 session.queue.put_nowait(message)
             except asyncio.QueueFull:
-                # Slow client: outgoing queue is full (exceeded 2 unconsumed messages)
+                # If the incoming message is high-frequency non-critical (progress / status),
+                # drop it instead of disconnecting the client!
+                if message.get("type") in ("mining_progress", "node_status"):
+                    continue
+
+                # If the incoming message is critical, try to make room by discarding an old progress/status frame
+                try:
+                    old = session.queue.get_nowait()
+                    if old.get("type") in ("mining_progress", "node_status"):
+                        session.queue.put_nowait(message)
+                        continue
+                    # If the oldest message was also critical, put it back
+                    session.queue.put_nowait(old)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+                # Slow client: outgoing queue is full of unconsumed critical messages
                 logger.warning("Disconnecting slow WebSocket client %s (queue full)", session.ip)
                 session.close_code = status.WS_1013_TRY_AGAIN_LATER
                 session.done_event.set()

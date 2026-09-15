@@ -50,6 +50,7 @@ class ApiConfig(BaseSettings):
     ws_ping_interval: float = Field(default=20.0, alias="PYC_WS_PING_INTERVAL")
     ws_idle_timeout: float = Field(default=60.0, alias="PYC_WS_IDLE_TIMEOUT")
     ws_max_message_bytes: int = Field(default=4096, alias="PYC_WS_MAX_MESSAGE_BYTES")
+    ws_client_queue_size: int = Field(default=64, alias="PYC_WS_CLIENT_QUEUE_SIZE")
 
     mining_max_nonce: int = Field(default=500_000, alias="PYC_MINING_MAX_NONCE")
     mining_max_runtime_seconds: float = Field(default=30.0, alias="PYC_MINING_MAX_RUNTIME_SECONDS")
@@ -143,6 +144,7 @@ class ApiConfig(BaseSettings):
             ("ws_max_clients", self.ws_max_clients),
             ("ws_max_clients_per_ip", self.ws_max_clients_per_ip),
             ("ws_max_message_bytes", self.ws_max_message_bytes),
+            ("ws_client_queue_size", self.ws_client_queue_size),
             ("mining_max_nonce", self.mining_max_nonce),
             ("mining_progress_interval", self.mining_progress_interval),
             ("mining_max_transactions", self.mining_max_transactions),

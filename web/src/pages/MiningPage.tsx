@@ -36,6 +36,8 @@ export const MiningPage: React.FC = () => {
 
   const activeJobIdRef = useRef<string | null>(null);
   activeJobIdRef.current = activeJob?.id || null;
+  const lastTipHashRef = useRef<string | null>(null);
+  const lastPendingCountRef = useRef<number | null>(null);
 
   // Load mempool transactions
   const loadMempool = useCallback(async () => {
@@ -126,7 +128,18 @@ export const MiningPage: React.FC = () => {
 
         case "block_found":
           if (event.payload?.job_id && activeJobIdRef.current === event.payload.job_id) {
-            setActiveJob((prev) => (prev ? { ...prev, status: "FOUND", result_hash: event.payload.hash, nonce: event.payload.nonce } : null));
+            setActiveJob((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "FOUND",
+                    result_hash: event.payload.hash,
+                    nonce: event.payload.nonce,
+                    hashes_tried: event.payload.hashes_tried ?? prev.hashes_tried,
+                    elapsed_seconds: event.payload.elapsed_seconds ?? prev.elapsed_seconds,
+                  }
+                : null
+            );
           }
           break;
 
@@ -141,10 +154,18 @@ export const MiningPage: React.FC = () => {
                 accepted: true,
                 template_height: event.payload.height,
                 total_reward: event.payload.reward ?? 50,
+                nonce: event.payload.nonce ?? prev?.nonce,
+                hashes_tried: event.payload.hashes_tried ?? prev?.hashes_tried ?? 0,
+                elapsed_seconds: event.payload.elapsed_seconds ?? prev?.elapsed_seconds ?? 0,
               };
               setCompletedJob(finished);
               return null;
             });
+            getMiningJob(event.payload.job_id)
+              .then((finalJob) => {
+                setCompletedJob(finalJob);
+              })
+              .catch(() => {});
             // Update wallet balance, mempool, and new template
             queryClient.invalidateQueries({ queryKey: ["wallet"] });
             loadMempool();
@@ -156,10 +177,21 @@ export const MiningPage: React.FC = () => {
           if (event.payload?.job_id && activeJobIdRef.current === event.payload.job_id) {
             setActiveJob((prev) => {
               if (prev) {
-                setCompletedJob({ ...prev, status: "CANCELLED" });
+                setCompletedJob({
+                  ...prev,
+                  status: "CANCELLED",
+                  nonce: event.payload.nonce ?? prev.nonce,
+                  hashes_tried: event.payload.hashes_tried ?? prev.hashes_tried,
+                  elapsed_seconds: event.payload.elapsed_seconds ?? prev.elapsed_seconds,
+                });
               }
               return null;
             });
+            getMiningJob(event.payload.job_id)
+              .then((finalJob) => {
+                setCompletedJob(finalJob);
+              })
+              .catch(() => {});
           }
           break;
 
@@ -171,16 +203,31 @@ export const MiningPage: React.FC = () => {
                   ...prev,
                   status: event.payload.status,
                   error: event.payload.error,
+                  nonce: event.payload.nonce ?? prev.nonce,
+                  hashes_tried: event.payload.hashes_tried ?? prev.hashes_tried,
+                  elapsed_seconds: event.payload.elapsed_seconds ?? prev.elapsed_seconds,
                 });
               }
               return null;
             });
+            getMiningJob(event.payload.job_id)
+              .then((finalJob) => {
+                setCompletedJob(finalJob);
+              })
+              .catch(() => {});
           }
           break;
 
         case "node_status":
-          // Refresh mempool on tip update
-          loadMempool();
+          // Only refresh mempool when tip_hash or pending_count actually changes
+          const tip = event.payload?.tip_hash;
+          const pending = event.payload?.pending_count;
+          if (tip !== lastTipHashRef.current || pending !== lastPendingCountRef.current) {
+            lastTipHashRef.current = tip;
+            lastPendingCountRef.current = pending;
+            loadMempool();
+            buildTemplate();
+          }
           break;
       }
     });
@@ -194,10 +241,19 @@ export const MiningPage: React.FC = () => {
   useEffect(() => {
     if (!activeJob) return;
 
-    const interval = window.setInterval(async () => {
+    let backoffMultiplier = 1;
+    let timeoutId: number;
+
+    const poll = async () => {
       try {
         const polled = await getMiningJob(activeJob.id);
-        if (polled.status === "ACCEPTED" || polled.status === "FAILED" || polled.status === "STALE" || polled.status === "CANCELLED") {
+        backoffMultiplier = 1;
+        if (
+          polled.status === "ACCEPTED" ||
+          polled.status === "FAILED" ||
+          polled.status === "STALE" ||
+          polled.status === "CANCELLED"
+        ) {
           setActiveJob(null);
           setCompletedJob(polled);
           if (polled.status === "ACCEPTED") {
@@ -205,18 +261,23 @@ export const MiningPage: React.FC = () => {
             loadMempool();
             buildTemplate();
           }
+          return;
         } else {
           setActiveJob((prev) => ({
             ...(prev || polled),
             ...polled,
           }));
         }
-      } catch {
-        // Ignore polling error
+      } catch (err: any) {
+        if (err?.status === 429 || err?.message?.includes("429") || err?.response?.status === 429) {
+          backoffMultiplier = Math.min(backoffMultiplier * 2, 8);
+        }
       }
-    }, 800);
+      timeoutId = window.setTimeout(poll, 1500 * backoffMultiplier);
+    };
 
-    return () => clearInterval(interval);
+    timeoutId = window.setTimeout(poll, 1500);
+    return () => clearTimeout(timeoutId);
   }, [activeJob?.id, buildTemplate, loadMempool, queryClient]);
 
   // Handler: Start Mining
@@ -259,12 +320,26 @@ export const MiningPage: React.FC = () => {
     if (!activeJob) return;
     try {
       setIsCancelling(true);
-      await cancelMiningJob(activeJob.id);
-      setActiveJob(null);
-      setCompletedJob({
-        ...activeJob,
-        status: "CANCELLED",
-      });
+      const res = await cancelMiningJob(activeJob.id);
+      if (res.cancelled) {
+        setActiveJob(null);
+        setCompletedJob({
+          ...activeJob,
+          status: "CANCELLED",
+        });
+      } else {
+        // Not cancelled: check real status from server
+        const current = await getMiningJob(activeJob.id);
+        if (current.status !== "QUEUED" && current.status !== "MINING") {
+          setActiveJob(null);
+          setCompletedJob(current);
+          if (current.status === "ACCEPTED") {
+            queryClient.invalidateQueries({ queryKey: ["wallet"] });
+            loadMempool();
+            buildTemplate();
+          }
+        }
+      }
     } catch (err: any) {
       setErrorMsg(err?.message || "Failed to cancel mining job");
     } finally {

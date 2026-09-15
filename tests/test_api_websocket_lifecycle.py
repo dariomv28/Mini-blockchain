@@ -82,11 +82,12 @@ class FakeWebSocket:
         self.incoming.put_nowait({"type": "websocket.disconnect", "code": 1000})
 
 
-def make_manager(*, cap=2, per_ip=2):
+def make_manager(*, cap=2, per_ip=2, queue_size=2):
     return WebSocketManager(ApiConfig(
         _env_file=None,
         ws_max_clients=cap,
         ws_max_clients_per_ip=per_ip,
+        ws_client_queue_size=queue_size,
         # Background status updates must not determine test ordering.
         ws_status_interval=3600,
     ))

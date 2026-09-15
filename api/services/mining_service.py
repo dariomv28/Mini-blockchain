@@ -44,6 +44,7 @@ class MiningJob:
     accepted: bool | None = None
     error: str | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    thread: threading.Thread | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,14 +111,15 @@ class MiningService:
         coinbase_tx = template.transactions[0] if template.transactions else None
         coinbase_output_amount = coinbase_tx.outputs[0].amount if (coinbase_tx and coinbase_tx.outputs) else 50
         fees = max(0, coinbase_output_amount - 50)
-        status_data = await self.node.get_status()
+        parent_info = await self.node.get_block_info_by_hash(template.previous_block_hash)
+        template_height = (parent_info["height"] + 1) if parent_info is not None else 1
 
         return {
             "previous_block_hash": template.previous_block_hash,
             "merkle_root": template.merkle_root,
             "difficulty": template.difficulty,
             "nonce": template.nonce,
-            "template_height": status_data["height"] + 1,
+            "template_height": template_height,
             "timestamp": template.timestamp,
             "miner_address": miner_address,
             "transactions": [tx.to_dict() for tx in template.transactions],
@@ -161,7 +163,8 @@ class MiningService:
             coinbase_tx = template.transactions[0] if template.transactions else None
             coinbase_output_amount = coinbase_tx.outputs[0].amount if (coinbase_tx and coinbase_tx.outputs) else 50
             fees = max(0, coinbase_output_amount - 50)
-            status_data = await self.node.get_status()
+            parent_info = await self.node.get_block_info_by_hash(template.previous_block_hash)
+            template_height = (parent_info["height"] + 1) if parent_info is not None else 1
 
             job_id = uuid.uuid4().hex
             job = MiningJob(
@@ -170,7 +173,7 @@ class MiningService:
                 miner_address=miner_address,
                 status="QUEUED",
                 created_at=time.time(),
-                template_height=status_data["height"] + 1,
+                template_height=template_height,
                 previous_hash=template.previous_block_hash,
                 transaction_count=len(template.transactions),
                 difficulty=template.difficulty,
@@ -188,6 +191,19 @@ class MiningService:
             return job
 
     async def _run_mining(self, job: MiningJob, template: Block, max_nonce: int) -> None:
+        if job.stop_event.is_set():
+            job.status = "CANCELLED"
+            await self._safe_broadcast({
+                "type": "mining_cancelled",
+                "payload": {
+                    "job_id": job.id,
+                    "hashes_tried": 0,
+                    "nonce": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            })
+            return
+
         job.status = "MINING"
         job.started_at = time.time()
 
@@ -228,26 +244,43 @@ class MiningService:
                     {"type": "mining_progress", "payload": payload},
                 )
 
-        mined: Block | None = None
-        try:
-            mined = await asyncio.wait_for(
-                asyncio.to_thread(
-                    mine_block_with_progress,
+        mined_holder: list[Block | None] = [None]
+        exc_holder: list[Exception | None] = [None]
+
+        def worker_target() -> None:
+            try:
+                mined_holder[0] = mine_block_with_progress(
                     template,
                     max_nonce=max_nonce,
                     progress_interval=self.config.mining_progress_interval,
                     on_progress=on_progress,
                     stop_event=job.stop_event,
-                ),
+                )
+            except Exception as exc:
+                exc_holder[0] = exc
+
+        job_thread = threading.Thread(target=worker_target, name=f"mining-thread-{job.id}", daemon=True)
+        job.thread = job_thread
+        job_thread.start()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(job_thread.join),
                 timeout=self.config.mining_max_runtime_seconds,
             )
         except asyncio.TimeoutError:
             job.stop_event.set()
             job.error = f"Mining exceeded maximum allowed runtime of {self.config.mining_max_runtime_seconds}s"
+            await asyncio.to_thread(job_thread.join, 3.0)
         except Exception as exc:
-            logger.error("Error during mining thread execution: %s", exc)
+            logger.error("Error awaiting mining thread: %s", exc)
             job.error = str(exc)
 
+        if exc_holder[0] is not None:
+            logger.error("Error during mining thread execution: %s", exc_holder[0])
+            job.error = str(exc_holder[0])
+
+        mined = mined_holder[0]
         job.finished_at = time.time()
         job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
 
@@ -256,7 +289,12 @@ class MiningService:
                 job.status = "CANCELLED"
                 await self._safe_broadcast({
                     "type": "mining_cancelled",
-                    "payload": {"job_id": job.id},
+                    "payload": {
+                        "job_id": job.id,
+                        "hashes_tried": job.hashes_tried,
+                        "nonce": job.nonce,
+                        "elapsed_seconds": round(job.elapsed_seconds, 2),
+                    },
                 })
             elif mined is not None:
                 job.status = "FOUND"
@@ -269,11 +307,19 @@ class MiningService:
                         "height": job.template_height,
                         "hash": job.result_hash,
                         "nonce": job.nonce,
+                        "hashes_tried": job.hashes_tried,
+                        "elapsed_seconds": round(job.elapsed_seconds, 2),
                     },
                 })
 
-                # Validate and commit through node
-                accepted = await self.node.accept_block(mined)
+                # Validate and commit through node safely
+                accepted = False
+                try:
+                    accepted = await self.node.accept_block(mined)
+                except Exception as exc:
+                    logger.exception("Exception while accepting block in node: %s", exc)
+                    job.error = f"Node error accepting block: {exc}"
+
                 job.accepted = accepted
 
                 if accepted:
@@ -286,16 +332,26 @@ class MiningService:
                             "hash": job.result_hash,
                             "miner_address": job.miner_address,
                             "reward": job.total_reward,
+                            "nonce": job.nonce,
+                            "hashes_tried": job.hashes_tried,
+                            "elapsed_seconds": round(job.elapsed_seconds, 2),
                         },
                     })
                 else:
-                    current_status = await self.node.get_status()
-                    if current_status["tip_hash"] != job.previous_hash:
-                        job.status = "STALE"
-                        job.error = "Another block won the race. The template previous hash is no longer the current tip."
-                    else:
+                    try:
+                        current_status = await self.node.get_status()
+                        if current_status.get("tip_hash") != job.previous_hash:
+                            job.status = "STALE"
+                            if not job.error:
+                                job.error = "Another block won the race. The template previous hash is no longer the current tip."
+                        else:
+                            job.status = "FAILED"
+                            if not job.error:
+                                job.error = "Block was rejected by node consensus rules."
+                    except Exception as status_exc:
                         job.status = "FAILED"
-                        job.error = "Block was rejected by node consensus rules."
+                        if not job.error:
+                            job.error = f"Failed to commit block: {status_exc}"
 
                     await self._safe_broadcast({
                         "type": "mining_finished",
@@ -303,6 +359,9 @@ class MiningService:
                             "job_id": job.id,
                             "status": job.status,
                             "error": job.error,
+                            "nonce": job.nonce,
+                            "hashes_tried": job.hashes_tried,
+                            "elapsed_seconds": round(job.elapsed_seconds, 2),
                         },
                     })
             else:
@@ -315,6 +374,9 @@ class MiningService:
                         "job_id": job.id,
                         "status": job.status,
                         "error": job.error,
+                        "nonce": job.nonce,
+                        "hashes_tried": job.hashes_tried,
+                        "elapsed_seconds": round(job.elapsed_seconds, 2),
                     },
                 })
         finally:
@@ -335,12 +397,23 @@ class MiningService:
                 return job
         return None
 
-    async def cancel_job(self, job_id: str, user_id: int | None = None) -> dict[str, Any]:
+    async def cancel_job(
+        self,
+        job_id: str,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> dict[str, Any]:
         job = self.get_job(job_id)
+        if user_id is not None and job.user_id != user_id and not is_admin:
+            raise APIError(403, "FORBIDDEN", "Cannot cancel another user's mining job")
+
         if job.status not in ("QUEUED", "MINING"):
             return {"job_id": job_id, "cancelled": False}
 
         job.stop_event.set()
+        if job.thread is not None and job.thread.is_alive():
+            await asyncio.to_thread(job.thread.join, 3.0)
+
         job.status = "CANCELLED"
         job.finished_at = time.time()
         job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
@@ -351,7 +424,12 @@ class MiningService:
 
         await self._safe_broadcast({
             "type": "mining_cancelled",
-            "payload": {"job_id": job.id},
+            "payload": {
+                "job_id": job.id,
+                "hashes_tried": job.hashes_tried,
+                "nonce": job.nonce,
+                "elapsed_seconds": round(job.elapsed_seconds, 2),
+            },
         })
         return {"job_id": job_id, "cancelled": True}
 
@@ -361,6 +439,8 @@ class MiningService:
             job = self._jobs.get(self._active_job_id)
             if job:
                 job.stop_event.set()
+                if job.thread is not None and job.thread.is_alive():
+                    await asyncio.to_thread(job.thread.join, 3.0)
         if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
             try:

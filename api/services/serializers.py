@@ -10,8 +10,8 @@ from transaction.tx_output import TxOutput
 from api.schemas.transaction import TransactionSubmitRequest
 
 
-def transaction_to_response(tx: Transaction) -> dict[str, Any]:
-    return {
+def transaction_to_response(tx: Transaction, fee: int | None = None) -> dict[str, Any]:
+    data = {
         "txid": tx.txid(),
         "version": tx.version,
         "timestamp": tx.timestamp,
@@ -33,6 +33,9 @@ def transaction_to_response(tx: Transaction) -> dict[str, Any]:
         ],
         "is_coinbase": len(tx.inputs) == 0,
     }
+    if fee is not None:
+        data["fee"] = fee
+    return data
 
 
 def block_to_response(block: Block, height: int | None = None) -> dict[str, Any]:

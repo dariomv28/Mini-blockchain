@@ -88,3 +88,61 @@ async def test_mining_api_cancel_job():
             await asyncio.sleep(0.1)
 
         assert job_status["status"] == "CANCELLED"
+
+
+@pytest.mark.anyio
+async def test_user_cannot_cancel_others_mining_job():
+    async with application() as (app, client):
+        # 1. Register Alice and Bob
+        await register(client, "alice_owner")
+        await register(client, "bob_attacker")
+
+        # 2. Alice logs in and creates a job
+        assert (await login(client, "alice_owner")).status_code == 200
+        alice_csrf = await csrf(client)
+        start_res = await client.post("/api/v1/mining/jobs", headers=alice_csrf, json={"max_nonce": 10_000_000})
+        assert start_res.status_code == 201
+        job_id = start_res.json()["job_id"]
+
+        # 3. Bob logs in and tries to cancel Alice's job
+        assert (await login(client, "bob_attacker")).status_code == 200
+        bob_csrf = await csrf(client)
+        attacker_cancel_res = await client.delete(f"/api/v1/mining/jobs/{job_id}", headers=bob_csrf)
+        assert attacker_cancel_res.status_code == 403
+        assert attacker_cancel_res.json()["error"]["code"] == "FORBIDDEN"
+
+        # 4. Alice can cancel her own job (or receive 200)
+        assert (await login(client, "alice_owner")).status_code == 200
+        alice_csrf = await csrf(client)
+        owner_cancel_res = await client.delete(f"/api/v1/mining/jobs/{job_id}", headers=alice_csrf)
+        assert owner_cancel_res.status_code == 200
+        assert "cancelled" in owner_cancel_res.json()
+
+
+@pytest.mark.anyio
+async def test_mining_permission_outside_demo_mode():
+    cfg = ApiConfig(
+        node_port=0,
+        node_db=None,
+        demo_mode=False,
+        cookie_secure=True,
+        jwt_secret="a" * 32,
+        admin_token="super-secret-token",
+    )
+    app = create_app(cfg)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="https://localhost") as client:
+            await register(client, "charlie_miner")
+            assert (await login(client, "charlie_miner")).status_code == 200
+            csrf_headers = await csrf(client)
+
+            # Normal user cannot start mining outside demo mode -> 403 Forbidden
+            denied_res = await client.post("/api/v1/mining/jobs", headers=csrf_headers, json={"max_nonce": 100_000})
+            assert denied_res.status_code == 403
+            assert denied_res.json()["error"]["code"] == "FORBIDDEN"
+
+            # Admin with Bearer token can start mining
+            admin_headers = {**csrf_headers, "Authorization": "Bearer super-secret-token"}
+            allowed_res = await client.post("/api/v1/mining/jobs", headers=admin_headers, json={"max_nonce": 100_000})
+            assert allowed_res.status_code == 201
+            assert "job_id" in allowed_res.json()

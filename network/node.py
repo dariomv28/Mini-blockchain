@@ -335,6 +335,9 @@ class Node:
     async def get_pending_transactions(self):
         return await self._call("pending")
 
+    async def get_pending_entries(self):
+        return await self._call("pending_entries")
+
     async def validate_chain(self):
         return await self._call("validate")
 
@@ -732,6 +735,15 @@ class Node:
             return self._chain.get_balance(event.value)
         if event.kind == "pending":
             return self._chain.mempool.get_transactions()
+        if event.kind == "pending_entries":
+            return [
+                {
+                    "transaction": entry.transaction,
+                    "fee": entry.fee,
+                    "size_bytes": entry.size_bytes,
+                }
+                for entry in self._chain.mempool._entries.values()
+            ]
         if event.kind == "validate":
             return self._chain.validate_chain()
         if event.kind == "template":

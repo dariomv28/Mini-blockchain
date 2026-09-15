@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from fastapi import APIRouter, Depends, Request, Response, status
 from api.errors import APIError
 from api.schemas.mining import (
@@ -15,6 +16,19 @@ from api.schemas.mining import (
 from auth.dependencies import get_current_user, require_csrf
 
 router = APIRouter(prefix="/mining", tags=["Mining"])
+
+
+def require_mining_permission(request: Request, user: dict) -> None:
+    config = request.app.state.config
+    if config.demo_mode:
+        return
+    # Outside demo mode, mining is a privileged operation restricted to administrators
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):]
+        if config.admin_token and secrets.compare_digest(token, config.admin_token):
+            return
+    raise APIError(status.HTTP_403_FORBIDDEN, "FORBIDDEN", "Mining requires demo mode or administrator privileges")
 
 
 @router.get("/template", response_model=CandidateTemplateResponse)
@@ -46,6 +60,7 @@ async def start_mining_job(
     user=Depends(require_csrf),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    require_mining_permission(request, user)
     wallet = request.app.state.app_database.wallet(user["id"])
     if not wallet:
         raise APIError(status.HTTP_404_NOT_FOUND, "WALLET_NOT_FOUND", "User has no configured wallet")
@@ -92,4 +107,13 @@ async def cancel_job(
     user=Depends(require_csrf),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return await request.app.state.mining_service.cancel_job(job_id, user["id"])
+    is_admin = False
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):]
+        config = request.app.state.config
+        if config.admin_token and secrets.compare_digest(token, config.admin_token):
+            is_admin = True
+    return await request.app.state.mining_service.cancel_job(
+        job_id, user_id=user["id"], is_admin=is_admin
+    )

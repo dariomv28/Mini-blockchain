@@ -141,3 +141,56 @@ async def test_stale_detection_on_race_condition(tmp_path):
     finally:
         await service.close()
         await node.stop()
+
+
+@pytest.mark.anyio
+async def test_cancel_job_authorization_forbidden(tmp_path):
+    node = Node(NodeConfig(port=0, db_path=str(tmp_path / "node.sqlite3")))
+    await node.start()
+    try:
+        service = MiningService(node, None, ApiConfig(node_port=0, node_db=None, mining_progress_interval=10))
+        address = "PYC_3ffb8df06c0f1aaf5dc42e57b232f7ddca0d0f81beabbcea"
+        job = await service.create_job(user_id=1, miner_address=address, max_nonce=10_000_000)
+
+        # Bob (user_id=2) tries to cancel Alice's (user_id=1) job -> 403 Forbidden
+        with pytest.raises(APIError) as exc_info:
+            await service.cancel_job(job.id, user_id=2, is_admin=False)
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.code == "FORBIDDEN"
+
+        # Admin (is_admin=True) can cancel
+        res_admin = await service.cancel_job(job.id, user_id=2, is_admin=True)
+        assert res_admin["cancelled"] is True
+        assert job.status == "CANCELLED"
+        assert job.thread is None or not job.thread.is_alive()
+    finally:
+        await service.close()
+        await node.stop()
+
+
+@pytest.mark.anyio
+async def test_accept_block_exception_handling(tmp_path):
+    from unittest.mock import AsyncMock
+    node = Node(NodeConfig(port=0, db_path=str(tmp_path / "node.sqlite3")))
+    await node.start()
+    try:
+        service = MiningService(node, None, ApiConfig(node_port=0, node_db=None))
+        address = "PYC_3ffb8df06c0f1aaf5dc42e57b232f7ddca0d0f81beabbcea"
+
+        # Simulate storage / node crash during accept_block
+        node.accept_block = AsyncMock(side_effect=RuntimeError("Simulated storage failure"))
+
+        job = await service.create_job(user_id=1, miner_address=address, max_nonce=100_000)
+
+        for _ in range(50):
+            if job.finished_at is not None:
+                break
+            await asyncio.sleep(0.1)
+
+        # Must not get stuck in FOUND; must be FAILED with error recorded
+        assert job.status == "FAILED"
+        assert job.accepted is False
+        assert "Simulated storage failure" in (job.error or "")
+    finally:
+        await service.close()
+        await node.stop()

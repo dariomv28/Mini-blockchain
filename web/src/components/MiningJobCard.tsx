@@ -106,7 +106,7 @@ export const MiningJobCard: React.FC<MiningJobCardProps> = ({
       <div className="mt-4 bg-slate-950/80 border border-slate-800/90 rounded-xl p-3.5 relative z-10">
         <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
           <span className="font-semibold uppercase tracking-wider text-[11px]">Latest Candidate SHA-256 Hash</span>
-          <span className="font-mono text-slate-500 text-[11px]">Target &lt; 2^(256 - {job.difficulty})</span>
+          <span className="font-mono text-slate-500 text-[11px]">Target &lt; 2^256 // {job.difficulty}</span>
         </div>
         <div className="font-mono text-xs sm:text-sm text-slate-300 font-semibold tracking-wider truncate bg-slate-900/60 p-2 rounded-lg border border-slate-800">
           {job.current_hash || "Searching for valid nonce..."}

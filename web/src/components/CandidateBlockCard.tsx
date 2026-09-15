@@ -117,7 +117,7 @@ export const CandidateBlockCard: React.FC<CandidateBlockCardProps> = ({
                   Difficulty
                 </span>
                 <span className="font-mono text-base font-bold text-amber-400">
-                  {template.difficulty} bits
+                  {template.difficulty}
                 </span>
               </div>
 
