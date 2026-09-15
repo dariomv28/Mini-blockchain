@@ -71,7 +71,8 @@ describe("MiningPage", () => {
     renderMiningPage();
 
     await waitFor(() => {
-      expect(screen.getByText("Mine This Block")).toBeInTheDocument();
+      expect(screen.getByText("Height #5")).toBeInTheDocument();
+      expect(screen.getByText("Mine This Block")).toBeEnabled();
     });
 
     const mineBtn = screen.getByText("Mine This Block");
@@ -88,7 +89,8 @@ describe("MiningPage", () => {
     renderMiningPage();
 
     await waitFor(() => {
-      expect(screen.getByText("Mine This Block")).toBeInTheDocument();
+      expect(screen.getByText("Height #5")).toBeInTheDocument();
+      expect(screen.getByText("Mine This Block")).toBeEnabled();
     });
 
     fireEvent.click(screen.getByText("Mine This Block"));

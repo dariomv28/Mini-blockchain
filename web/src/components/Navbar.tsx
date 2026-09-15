@@ -14,6 +14,7 @@ export const Navbar: React.FC = () => {
     { name: "Mining", path: "/app/mining", icon: Hammer },
     { name: "Send", path: "/app/send", icon: ArrowUpRight },
     { name: "Receive", path: "/app/receive", icon: ArrowDownLeft },
+    { name: "Explorer", path: "/explorer", icon: Globe },
   ];
 
   return (
@@ -39,7 +40,10 @@ export const Navbar: React.FC = () => {
           <nav className="hidden md:flex items-center gap-1">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = location.pathname === item.path;
+              const isActive =
+                item.path === "/explorer"
+                  ? location.pathname.startsWith("/explorer")
+                  : location.pathname === item.path;
               return (
                 <Link
                   key={item.path}
@@ -55,15 +59,6 @@ export const Navbar: React.FC = () => {
                 </Link>
               );
             })}
-
-            {/* Teaser for Phase 14 */}
-            <span
-              title="Coming in Phase 14"
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-slate-500 cursor-not-allowed opacity-60"
-            >
-              <Globe className="w-3.5 h-3.5" />
-              Explorer
-            </span>
           </nav>
         </div>
 
@@ -122,7 +117,10 @@ export const Navbar: React.FC = () => {
       <div className="md:hidden flex items-center justify-around border-t border-slate-800/80 bg-slate-950/80 px-2 py-1.5">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive = location.pathname === item.path;
+          const isActive =
+            item.path === "/explorer"
+              ? location.pathname.startsWith("/explorer")
+              : location.pathname === item.path;
           return (
             <Link
               key={item.path}
